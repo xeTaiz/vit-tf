@@ -2,3 +2,4 @@ data/
 wandb/
 checkpoints/
 __pycache__/
+slurm_log/
