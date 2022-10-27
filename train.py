@@ -70,8 +70,20 @@ if __name__ == '__main__':
     num_classes = len(data['labels'])
     label_dict = {i: n for i,n in enumerate(data['labels'])}
 
+    if args.label_percentage < 1.0:
+        non_bg_indices = [(mask == i).nonzero() for i in range(len(data['labels']))]
+        # Choose 1 - label_pct non-bg samples to set to background
+        to_drop = torch.cat([clas_idcs[torch.multinomial(
+            ONE.expand(clas_idcs.size(0)), 
+            int((1.0 - args.label_percentage) * clas_idcs.size(0))
+        )] for clas_idcs in non_bg_indices if clas_idcs.size(0) > 0], dim=0)
+        mask_reduced = mask.clone()
+        mask_reduced[split_squeeze3d(to_drop)] = 0
+    else:
+        mask_reduced = mask
+
     class_indices = {
-        n: (mask == i).nonzero().to(dev)
+        n: (mask_reduced == i).nonzero().to(dev)
         for i, n in enumerate(data['labels'])
     }
 
