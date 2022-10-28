@@ -119,7 +119,7 @@ if __name__ == '__main__':
     pprint.pprint(different_sample_idxs)
 
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', *args.wandb_tags]
-    wandb.init(project='ntf', entity='viscom-ulm', tags=tags)
+    wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args))
     wandb.watch(model)
 
     # Training
