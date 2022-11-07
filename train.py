@@ -2,9 +2,9 @@ import pprint
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.utils import save_image
 import numpy as np
 import matplotlib.pyplot as plt
+from torchmetrics import JaccardIndex
 
 from torchvtk.utils import make_5d
 
@@ -45,8 +45,9 @@ if __name__ == '__main__':
     parser.add_argument('--samples-per-iteration', type=int, default=32, help='Number of samples per class used in each iteration')
     parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
+    parser.add_argument('--no-validation', action='store_true', help='Skip validation')
     args = parser.parse_args()
-    
+
     # Setup
     BG_CLASS = args.background_class
     FP16 = not args.fp32
@@ -66,6 +67,7 @@ if __name__ == '__main__':
     else:
         vol  = data['vol']
         mask = data['mask']
+    IDX = min(vol.shape[-3:])//2
     vol_u8 = ((vol - vol.min()) * 255.0 / (vol.max() - vol.min())).cpu().numpy().astype(np.uint8)
     num_classes = len(data['labels'])
     label_dict = {i: n for i,n in enumerate(data['labels'])}
@@ -74,7 +76,7 @@ if __name__ == '__main__':
         non_bg_indices = [(mask == i).nonzero() for i in range(len(data['labels']))]
         # Choose 1 - label_pct non-bg samples to set to background
         to_drop = torch.cat([clas_idcs[torch.multinomial(
-            ONE.expand(clas_idcs.size(0)), 
+            ONE.expand(clas_idcs.size(0)),
             int((1.0 - args.label_percentage) * clas_idcs.size(0))
         )] for clas_idcs in non_bg_indices if clas_idcs.size(0) > 0], dim=0)
         mask_reduced = mask.clone()
@@ -93,16 +95,18 @@ if __name__ == '__main__':
         vol = vol.to(typ).to(dev)
 
     if POS_ENCODING:
-        x = torch.linspace(-1, 1, vol.size(-1))
-        y = torch.linspace(-1, 1, vol.size(-2))
-        z = torch.linspace(-1, 1, vol.size(-3))
+        x = torch.linspace(-1, 1, vol.size(-1), device=dev, dtype=typ)
+        y = torch.linspace(-1, 1, vol.size(-2), device=dev, dtype=typ)
+        z = torch.linspace(-1, 1, vol.size(-3), device=dev, dtype=typ)
         z, y, x = torch.meshgrid(z, y, x, indexing="ij")
         coords = torch.stack((z, y, x)) * 1.7185
-        vol = torch.cat([vol[None], coords.to(typ).to(dev)], dim=0)
+        vol = torch.cat([vol[None], coords], dim=0)
     else:
         vol = vol[None]
 
     model = create_cnn(in_dim=vol.size(0)).to(dev)
+    jaccard = JaccardIndex(num_classes=num_classes, average=None)
+    best_logit_iou, best_cosine_iou = torch.zeros(num_classes), torch.zeros(num_classes)
 
     sample_idxs = { n: l.size(0) for n, l in class_indices.items() }
     print('Volume Indices for each class:')
@@ -121,6 +125,7 @@ if __name__ == '__main__':
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', *args.wandb_tags]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args))
     wandb.watch(model)
+    close_plot = False
 
     # Training
     scaler = torch.cuda.amp.GradScaler()
@@ -159,8 +164,8 @@ if __name__ == '__main__':
         # Validate
         with torch.no_grad():
             log_dict = {'Charts/loss': loss}
-            temp_cluster_center_cos = torch.stack([        q[split_squeeze(v, bs=BS, f=FS)].mean(dim=(0,2)) for n,v in class_indices.items() ])
-            temp_cluster_center_l2  = torch.stack([ features[split_squeeze(v, bs=BS, f=FS)].mean(dim=(0,2)) for n,v in class_indices.items() ])
+            temp_cluster_center_cos = torch.nan_to_num(F.normalize(torch.stack([        q[split_squeeze(v, bs=BS, f=FS)].mean(dim=(0,2)) for n,v in class_indices.items() ])))
+            temp_cluster_center_l2  = torch.nan_to_num(torch.stack([ features[split_squeeze(v, bs=BS, f=FS)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
             if i > 0:
                 cos_dist_traveled = 1.0 - torch.einsum('nf,mf->nm', [cluster_center_cos, temp_cluster_center_cos]).diagonal()
                 l2_dist_traveled = F.pairwise_distance(temp_cluster_center_l2, cluster_center_l2)
@@ -179,15 +184,95 @@ if __name__ == '__main__':
                     for i, n in enumerate(class_indices.keys()) }
                 )
 
-            if i % 100 == 0:
+            # Distance to cluster center plots
+            l2_center_distances = torch.pow(features - cluster_center_l2[:,:,None,None,None].expand(-1, -1, 1, 1, 1), 2.0).sum(dim=1).sqrt()
+            l2_closest = l2_center_distances.argmin(dim=0)
+            l2_distance_map = torch.exp(-l2_center_distances)
+            cos_center_distances = torch.clamp(torch.einsum('fdhw,nf->ndhw', (q.squeeze(0), cluster_center_cos)), 0, 1)
+            cos_closest = cos_center_distances.argmax(dim=0)
+            l2_iou = jaccard(l2_closest.cpu(), mask)
+            jaccard.reset()
+            best_logit_iou = torch.stack([best_logit_iou, l2_iou], dim=0).max(0).values
+            cos_iou = jaccard(cos_closest.cpu(), mask)
+            jaccard.reset()
+            best_cosine_iou = torch.stack([best_cosine_iou, cos_iou], dim=0).max(0).values
+            log_dict.update({
+                f'Charts/IoU/logits/{n}': v for n,v in zip(data['labels'], l2_iou)
+            })
+            log_dict.update({
+                f'Charts/IoU/cosine/{n}': v for n, v in zip(data['labels'], cos_iou)
+            })
+            log_dict.update({
+                f'Charts/BestIoU/cosine/{n}': v for n,v in zip(data['labels'], best_cosine_iou)
+            })
+            log_dict.update({
+                f'Charts/BestIoU/logits/{n}': v for n, v in zip(data['labels'], best_logit_iou)
+            })
+
+            if (i == args.iterations-1) or (i % 100 == 0 and not args.no_validation):
+                log_dict.update({
+                    f'Plots_Dist/cluster_dist/l2/{n}/z': wandb.Image(l2_distance_map[i, IDX].cpu().float().numpy())
+                    for i, n in enumerate(class_indices.keys())
+                })
+                log_dict.update({
+                    f'Plots_Dist/cluster_dist/l2/{n}/y': wandb.Image(l2_distance_map[i, :, IDX].cpu().float().numpy())
+                    for i, n in enumerate(class_indices.keys())
+                })
+                log_dict.update({
+                    f'Plots_Dist/cluster_dist/l2/{n}/x': wandb.Image(l2_distance_map[i, :, :, IDX].cpu().float().numpy())
+                    for i, n in enumerate(class_indices.keys())
+                })
+                log_dict.update({
+                    f'Plots_Dist/cluster_dist/cos/{n}/z':
+                    wandb.Image(cos_center_distances.cpu()[i, IDX])
+                    for i, n in enumerate(class_indices.keys())
+                })
+                log_dict.update({
+                    f'Plots_Dist/cluster_dist/cos/{n}/y':
+                    wandb.Image(cos_center_distances.cpu()[i, :, IDX])
+                    for i, n in enumerate(class_indices.keys())
+                })
+                log_dict.update({
+                    f'Plots_Dist/cluster_dist/cos/{n}/x':
+                    wandb.Image(cos_center_distances.cpu()[i, :, :, IDX])
+                    for i, n in enumerate(class_indices.keys())
+                })
+                log_dict['Plots_Seg/cluster_dist/l2_closest/z'] = wandb.Image(vol_u8[IDX], masks={
+                    'predictions':  {'mask_data': l2_closest[IDX].cpu().numpy(),   'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
+                })
+                log_dict['Plots_Seg/cluster_dist/l2_closest/y'] = wandb.Image(vol_u8[:, IDX], masks={
+                    'predictions':  {'mask_data': l2_closest[:, IDX].cpu().numpy(),   'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict }
+                })
+                log_dict['Plots_Seg/cluster_dist/l2_closest/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
+                    'predictions':  {'mask_data': l2_closest[:, :, IDX].cpu().numpy(),   'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
+                })
+                log_dict['Plots_Seg/cluster_dist/cos_closest/z'] = wandb.Image(vol_u8[IDX], masks={
+                    'predictions':  {'mask_data': cos_closest[IDX].cpu().numpy(),  'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
+                })
+                log_dict['Plots_Seg/cluster_dist/cos_closest/y'] = wandb.Image(vol_u8[:, IDX], masks={
+                    'predictions':  {'mask_data': cos_closest[:, IDX].cpu().numpy(),  'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict }
+                })
+                log_dict['Plots_Seg/cluster_dist/cos_closest/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
+                    'predictions':  {'mask_data': cos_closest[:, :, IDX].cpu().numpy(),  'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
+                })
+
+
+
                 # Similarity / ClusterDistance matrices
                 cos_sim = similarity_matrix(cluster_center_cos.float(), 'cosine')
                 l2_sim  = similarity_matrix(cluster_center_l2.float(),   'l2')
                 cos_sim_fig = plot_similarity_matrix(cos_sim.cpu(), data['labels'], 'cosine')
                 l2_sim_fig  = plot_similarity_matrix(l2_sim.cpu(),  data['labels'], 'l2')
+                close_plot = True
                 log_dict.update({
-                    'plots/similarity/cosine': cos_sim_fig,
-                    'plots/similarity/logits': l2_sim_fig
+                    'Plots/similarity/cosine': cos_sim_fig,
+                    'Plots/similarity/logits': l2_sim_fig
                 })
 
                 # Cluster standard deviations
@@ -204,29 +289,29 @@ if __name__ == '__main__':
                 pred_logits = cluster_kmeans(features, num_classes)
                 pred_cosine = cluster_kmeans(q, num_classes)
                 log_dict.update({
-                    'plots/kmeans/logits/z': wandb.Image(vol_u8[62], masks={
-                        'predictions':  {'mask_data': pred_logits[62] },
-                        'ground_truth': {'mask_data': mask[62].numpy(), 'class_labels': label_dict}
+                    'Plots_Seg/kmeans/logits/z': wandb.Image(vol_u8[IDX], masks={
+                        'predictions':  {'mask_data': pred_logits[IDX] },
+                        'ground_truth': {'mask_data': mask[IDX].numpy(), 'class_labels': label_dict}
                     }),
-                    'plots/kmeans/logits/y': wandb.Image(vol_u8[:, 62], masks={
-                        'predictions':  {'mask_data': pred_logits[:, 62] },
-                        'ground_truth': {'mask_data': mask[:, 62].numpy(), 'class_labels': label_dict}
+                    'Plots_Seg/kmeans/logits/y': wandb.Image(vol_u8[:, IDX], masks={
+                        'predictions':  {'mask_data': pred_logits[:, IDX] },
+                        'ground_truth': {'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict}
                     }),
-                    'plots/kmeans/logits/x': wandb.Image(vol_u8[:, :, 62], masks={
-                        'predictions':  {'mask_data': pred_logits[:, :, 62] },
-                        'ground_truth': {'mask_data': mask[:, :, 62].numpy(), 'class_labels': label_dict}
+                    'Plots_Seg/kmeans/logits/x': wandb.Image(vol_u8[:, :, IDX], masks={
+                        'predictions':  {'mask_data': pred_logits[:, :, IDX] },
+                        'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict}
                     }),
-                    'plots/kmeans/cosine/z': wandb.Image(vol_u8[62], masks={
-                        'predictions':  { 'mask_data': pred_cosine[62] },
-                        'ground_truth': { 'mask_data': mask[62].numpy(), 'class_labels': label_dict }
+                    'Plots_Seg/kmeans/cosine/z': wandb.Image(vol_u8[IDX], masks={
+                        'predictions':  { 'mask_data': pred_cosine[IDX] },
+                        'ground_truth': { 'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
                     }),
-                    'plots/kmeans/cosine/y': wandb.Image(vol_u8[:, 62], masks={
-                        'predictions':  { 'mask_data': pred_cosine[:, 62] },
-                        'ground_truth': { 'mask_data': mask[:, 62].numpy(), 'class_labels': label_dict }
+                    'Plots_Seg/kmeans/cosine/y': wandb.Image(vol_u8[:, IDX], masks={
+                        'predictions':  { 'mask_data': pred_cosine[:, IDX] },
+                        'ground_truth': { 'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict }
                     }),
-                    'plots/kmeans/cosine/x': wandb.Image(vol_u8[:, :, 62], masks={
-                        'predictions':  { 'mask_data': pred_cosine[:, :, 62] },
-                        'ground_truth': { 'mask_data': mask[:, :, 62].numpy(), 'class_labels': label_dict }
+                    'Plots_Seg/kmeans/cosine/x': wandb.Image(vol_u8[:, :, IDX], masks={
+                        'predictions':  { 'mask_data': pred_cosine[:, :, IDX] },
+                        'ground_truth': { 'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
                     })
                 })
 
@@ -234,14 +319,15 @@ if __name__ == '__main__':
                 pcs_logits = project_pca(features)
                 pcs_cosine = project_pca(q)
                 log_dict.update({
-                    'plots/pca/logits/z': wandb.Image(pcs_logits[62]),
-                    'plots/pca/logits/y': wandb.Image(pcs_logits[:, 62]),
-                    'plots/pca/logits/x': wandb.Image(pcs_logits[:, :, 62]),
-                    'plots/pca/cosine/z': wandb.Image(pcs_cosine[62]),
-                    'plots/pca/cosine/y': wandb.Image(pcs_cosine[:, 62]), 
-                    'plots/pca/cosine/x': wandb.Image(pcs_cosine[:, :, 62])
+                    'Plots_Feat/pca/logits/z': wandb.Image(pcs_logits[IDX]),
+                    'Plots_Feat/pca/logits/y': wandb.Image(pcs_logits[:, IDX]),
+                    'Plots_Feat/pca/logits/x': wandb.Image(pcs_logits[:, :, IDX]),
+                    'Plots_Feat/pca/cosine/z': wandb.Image(pcs_cosine[IDX]),
+                    'Plots_Feat/pca/cosine/y': wandb.Image(pcs_cosine[:, IDX]),
+                    'Plots_Feat/pca/cosine/x': wandb.Image(pcs_cosine[:, :, IDX])
                 })
 
             wandb.log(log_dict)
-            plt.close(cos_sim_fig)
-            plt.close(l2_sim_fig)
+            if close_plot:
+                plt.close(cos_sim_fig)
+                plt.close(l2_sim_fig)

@@ -5,3 +5,4 @@ git+https://github.com/xeTaiz/torchvtk@master#egg=torchvtk
 wandb
 sklearn
 matplotlib
+torchmetrics
