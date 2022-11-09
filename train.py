@@ -20,16 +20,29 @@ pltkwargs = {
     'tight_layout': True
 }
 
-def create_cnn(in_dim):
+def conv_layer(n_in, n_out, Norm, Act):
     return nn.Sequential(
-        nn.GroupNorm(in_dim, in_dim),
+        nn.Conv3d(n_in, n_out, kernel_size=3, stride=1, padding=1),
+        Norm(n_out // 4, n_out), 
+        Act(inplace=True)
+    )
+
+def create_cnn(in_dim, n_features=[8, 32, 16], Act=nn.Mish, Norm=nn.GroupNorm):
+    feats = [in_dim] + n_features[:-1]
+    layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act)
+        for n_in, n_out in zip(feats, feats[1:])]
+    last = nn.Conv3d(n_features[-2], n_features[-1], kernel_size=3, stride=1, padding=1)
+    return nn.Sequential(*layers, last)
+
+def create_cnn_old(in_dim):
+    return nn.Sequential(
         nn.Conv3d(in_dim, 8, kernel_size=3, stride=1, padding=1),
-        nn.ReLU(inplace=True),
-        nn.GroupNorm(8, 8),
+        nn.GroupNorm(in_dim, in_dim),
+        nn.Mish(inplace=True),
         nn.Conv3d(8, 16, kernel_size=3, stride=1, padding=1),
-        nn.ReLU(inplace=True),
-        nn.GroupNorm(8, 16),
-        nn.Conv3d(16, 16, kernel_size=3, stride=1, padding=1),
+        nn.GroupNorm(8, 8),
+        nn.Mish(inplace=True),
+        nn.Conv3d(16, 16, kernel_size=3, stride=1, padding=1)
     )
 
 if __name__ == '__main__':
@@ -46,6 +59,7 @@ if __name__ == '__main__':
     parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
+    parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
     args = parser.parse_args()
 
     # Setup
@@ -104,7 +118,9 @@ if __name__ == '__main__':
     else:
         vol = vol[None]
 
-    model = create_cnn(in_dim=vol.size(0)).to(dev)
+    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 32, 16]
+    model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
+    print(model)
     jaccard = JaccardIndex(num_classes=num_classes, average=None)
     best_logit_iou, best_cosine_iou = torch.zeros(num_classes), torch.zeros(num_classes)
 
