@@ -3,6 +3,6 @@ notebook
 jupyter_contrib_nbextensions
 git+https://github.com/xeTaiz/torchvtk@master#egg=torchvtk
 wandb
-sklearn
+scikit-learn
 matplotlib
 torchmetrics
