@@ -248,20 +248,20 @@ if __name__ == '__main__':
             # Cluster standard deviations
             log_dict.update({
                 f'StdDev_Cos/{n}': torch.mean((pos_q[2*i:2*i+2].mean(dim=0) - temp_cluster_center_cos[i])**2, dim=0).cpu()
-                for i,n in enumerate(class_indices.keys()) if n != BG_CLASS }
+                for i,n in enumerate(pos_samples.keys()) }
             )
             log_dict.update({
                 f'StdDev_Logits/{n}': torch.mean((pos_feat[2*i:2*i+2].mean(dim=0) - temp_cluster_center_cos[i])**2, dim=0).cpu()
-                for i,n in enumerate(class_indices.keys()) if n != BG_CLASS }
+                for i,n in enumerate(pos_samples.keys()) }
             )
 
             log_dict.update({
                     f'CC_Logits_dist_traveled/{n}': l2_dist_traveled[i].cpu()
-                    for i, n in enumerate(class_indices.keys()) if n != BG_CLASS }
+                    for i, n in enumerate(pos_samples.keys()) }
                 )
             log_dict.update({
                     f'CC_Cosine_dist_traveled/{n}': cos_dist_traveled[i].cpu()
-                    for i, n in enumerate(class_indices.keys()) if n != BG_CLASS }
+                    for i, n in enumerate(pos_samples.keys()) }
                 )
 
 
