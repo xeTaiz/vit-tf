@@ -15,6 +15,7 @@ import wandb
 from argparse import ArgumentParser
 
 from utils import *
+from semisparseconv import gather_receiptive_fields
 
 pltkwargs = {
     'dpi':  200,
@@ -24,7 +25,7 @@ pltkwargs = {
 def conv_layer(n_in, n_out, Norm, Act):
     return nn.Sequential(
         nn.Conv3d(n_in, n_out, kernel_size=3, stride=1, padding=1),
-        Norm(n_out // 4, n_out), 
+        Norm(n_out // 4, n_out),
         Act(inplace=True)
     )
 
@@ -64,6 +65,7 @@ if __name__ == '__main__':
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
     parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
     parser.add_argument('--lambda-std', type=float, default=1.0, help='Scales loss on cluster standard deviations.')
+    parser.add_argument('--lambda-ce', type=float, default=1.0, help='Scales cross entropy loss')
     args = parser.parse_args()
 
     # Setup
@@ -74,7 +76,7 @@ if __name__ == '__main__':
     POS_ENCODING = not args.no_pos_encoding
     if args.lr_schedule.lower() == 'onecycle':
         LR_SCHED = partial(torch.optim.lr_scheduler.OneCycleLR, max_lr=args.learning_rate, total_steps=args.iterations)
-    elif args.lr_schedule.lower() == 'cosine': 
+    elif args.lr_schedule.lower() == 'cosine':
         LR_SCHED = partial(torch.optim.lr_scheduler.CosineAnnealingLR, T_max=args.iterations)
     else:
         LR_SCHED = partial(torch.optim.lr_scheduler.ConstantLR, factor=1.0)
@@ -95,6 +97,7 @@ if __name__ == '__main__':
     vol_u8 = ((vol - vol.min()) * 255.0 / (vol.max() - vol.min())).cpu().numpy().astype(np.uint8)
     num_classes = len(data['labels'])
     label_dict = {i: n for i,n in enumerate(data['labels'])}
+    label2idx =  {n: i for i,n in label_dict.items()}
 
     if args.label_percentage < 1.0:
         non_bg_indices = [(mask == i).nonzero() for i in range(len(data['labels']))]
@@ -130,13 +133,14 @@ if __name__ == '__main__':
 
     args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 32, 16]
     model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
+    cls_head = nn.Linear(args.cnn_layers[-1], num_classes).to(dev)
 
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', *args.wandb_tags]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args))
     wandb.watch(model)
     print(model)
     jaccard = JaccardIndex(num_classes=num_classes, average=None)
-    best_logit_iou, best_cosine_iou = torch.zeros(num_classes), torch.zeros(num_classes)
+    best_logit_iou, best_cosine_iou, best_mlp_iou = torch.zeros(num_classes), torch.zeros(num_classes), torch.zeros(num_classes)
 
     sample_idxs = { n: l.size(0) for n, l in class_indices.items() }
     print('Volume Indices for each class:')
@@ -185,6 +189,10 @@ if __name__ == '__main__':
                 sim = torch.einsum('bfp,bfn->bpn', [pos[..., [0]], torch.cat([pos[..., [1]], neg], dim=-1)]).squeeze(1)
                 labels = torch.zeros(sim.size(0), dtype=torch.long, device=dev)
                 loss += F.cross_entropy(sim, labels)
+                if args.lambda_ce > 0:
+                    cls_pred = cls_head(pos.permute(0,2,1)).view(-1, num_classes)
+                    ce_loss = args.lambda_ce * F.cross_entropy(cls_pred, ONE.long().expand(cls_pred.size(0)) * label2idx[n])
+                    loss += ce_loss
 
         if args.lambda_std > 0:
             cos_std = args.lambda_std * torch.stack([q[split_squeeze(v, bs=BS, f=FS)].std() for v in class_indices.values() if v.numel() > 0]).sum(0)
@@ -198,8 +206,13 @@ if __name__ == '__main__':
         sched.step()
         # Validate
         with torch.no_grad():
-            log_dict = {'Charts/loss': loss, 'Charts/std_loss': cos_std.cpu(), 'Charts/learning_rate': sched.get_last_lr()[0]}
-            # Compute mean of normalized feature vectors per class -> cluster centers 
+            log_dict = {
+                'Charts/loss': loss,
+                'Charts/std_loss': cos_std.cpu(),
+                'Charts/ce_loss': ce_loss.cpu(),
+                'Charts/learning_rate': sched.get_last_lr()[0]
+            }
+            # Compute mean of normalized feature vectors per class -> cluster centers
             temp_cluster_center_cos = torch.nan_to_num(torch.stack([ q[split_squeeze(v, bs=BS, f=FS)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
             # Magnitude of mean of normalized feature vectors is distance from 0, should get close to 1 for a decisive cluster
             cluster_center_cos_magnitude = torch.norm(temp_cluster_center_cos, dim=1)
@@ -322,8 +335,29 @@ if __name__ == '__main__':
                     'predictions':  {'mask_data': cos_closest[:, :, IDX].cpu().numpy(),  'class_labels': label_dict },
                     'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
                 })
+                # MLP Predictions
+                pred = cls_head(q.permute(0,2,3,4,1)).argmax(-1).cpu().squeeze()
+                mlp_iou = jaccard(pred, mask)
+                best_mlp_iou = torch.stack([best_mlp_iou, mlp_iou], dim=0).max(0).values
+                log_dict.update({
+                    f'IoU_MLP/{n}': v for n,v in zip(data['labels'], mlp_iou)
+                })
+                log_dict.update({
+                    f'BestIoU_MLP/{n}': v for n,v in zip(data['labels'], best_mlp_iou)
+                })
 
-
+                log_dict['Plots_Seg_MLP/z'] = wandb.Image(vol_u8[:, :, IDX], masks={
+                    'predictions': { 'mask_data': pred[:, :, IDX].numpy(), 'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
+                })
+                log_dict['Plots_Seg_MLP/y'] = wandb.Image(vol_u8[:, IDX], masks={
+                    'predictions': { 'mask_data': pred[:, IDX].numpy(), 'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict }
+                })
+                log_dict['Plots_Seg_MLP/x'] = wandb.Image(vol_u8[IDX], masks={
+                    'predictions': { 'mask_data': pred[IDX].numpy(), 'class_labels': label_dict },
+                    'ground_truth': {'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
+                })
 
                 # Similarity / ClusterDistance matrices
                 cos_sim = similarity_matrix(cluster_center_cos.float(), 'cosine')
