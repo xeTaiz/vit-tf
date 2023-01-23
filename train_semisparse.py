@@ -269,6 +269,9 @@ if __name__ == '__main__':
                 with torch.autocast('cuda', enabled=True, dtype=typ):
                     full_feats = model(make_5d(vol))
                     full_qs = F.normalize(full_feats, dim=1)
+                    cluster_center_l2  = torch.nan_to_num(torch.stack([ full_feats[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
+                    cluster_center_cos = torch.nan_to_num(torch.stack([    full_qs[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
+
                 # Distance to cluster centers
                 l2_center_distances = torch.pow(full_feats - cluster_center_l2[:,:,None,None,None].expand(-1, -1, 1, 1, 1), 2.0).sum(dim=1).sqrt()
                 # Get closest (i.e. segmentation) cluster center class
@@ -280,6 +283,7 @@ if __name__ == '__main__':
                 # Get (cosine distance) closest cluster center segmentation
                 cos_closest = cos_center_distances.argmax(dim=0)
                 # Compute IoUs
+                print(l2_closest.shape, mask.shape)
                 l2_iou = jaccard(l2_closest.cpu(), mask)
                 jaccard.reset()
                 best_logit_iou = torch.stack([best_logit_iou, l2_iou], dim=0).max(0).values
