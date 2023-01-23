@@ -266,8 +266,9 @@ if __name__ == '__main__':
 
 
             if (i == args.iterations-1) or (i % 100 == 0 and not args.no_validation):
-                full_feats = model(make_5d(vol))
-                full_qs = F.normalize(full_feats, dim=1)
+                with torch.autocast('cuda', enabled=True, dtype=typ):
+                    full_feats = model(make_5d(vol))
+                    full_qs = F.normalize(full_feats, dim=1)
                 # Distance to cluster centers
                 l2_center_distances = torch.pow(full_feats - cluster_center_l2[:,:,None,None,None].expand(-1, -1, 1, 1, 1), 2.0).sum(dim=1).sqrt()
                 # Get closest (i.e. segmentation) cluster center class
