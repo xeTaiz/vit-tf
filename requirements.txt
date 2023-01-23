@@ -5,4 +5,4 @@ git+https://github.com/xeTaiz/torchvtk@master#egg=torchvtk
 wandb
 scikit-learn
 matplotlib
-torchmetrics
+torchmetrics==0.10.2
