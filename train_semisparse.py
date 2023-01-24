@@ -16,7 +16,7 @@ import wandb
 from argparse import ArgumentParser
 
 from utils import *
-from semisparseconv import gather_receiptive_fields
+from semisparseconv import gather_receiptive_fields2 as gather_receiptive_fields
 
 pltkwargs = {
     'dpi':  200,
