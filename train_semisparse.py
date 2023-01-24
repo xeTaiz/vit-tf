@@ -113,7 +113,7 @@ if __name__ == '__main__':
         non_bg_indices = [(mask == i).nonzero() for i in range(len(data['labels']))]
         # Choose 1 - label_pct non-bg samples to set to background
         to_drop = torch.cat([clas_idcs[torch.multinomial(
-            ONE.expand(clas_idcs.size(0)),
+            ONE.cpu().expand(clas_idcs.size(0)),
             int((1.0 - args.label_percentage) * clas_idcs.size(0))
         )] for clas_idcs in non_bg_indices if clas_idcs.size(0) > 0], dim=0)
         mask_reduced = mask.clone()
@@ -153,7 +153,7 @@ if __name__ == '__main__':
     model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
 
-    tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', *args.wandb_tags]
+    tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), mode='offline' if args.debug else 'online')
     wandb.watch(model)
     print(model)
@@ -267,8 +267,13 @@ if __name__ == '__main__':
 
             if (i == args.iterations-1) or (i % 100 == 0 and not args.no_validation):
                 with torch.autocast('cuda', enabled=True, dtype=typ):
-                    full_feats = model(make_5d(vol))
+                    full_feats = model(F.pad(make_5d(vol), tuple([REC_FIELD//2]*6)))
                     full_qs = F.normalize(full_feats, dim=1)
+                    print('full_feats: ', full_feats.shape)
+                    print('class_indices:')
+                    pprint.pprint({n:v.shape for n,v in class_indices.items()})
+                    for n,v in class_indices.items():
+                        print(full_feats[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)).shape)
                     cluster_center_l2  = torch.nan_to_num(torch.stack([ full_feats[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
                     cluster_center_cos = torch.nan_to_num(torch.stack([    full_qs[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
 
@@ -366,8 +371,8 @@ if __name__ == '__main__':
                 })
 
                 # K-Means clustering
-                pred_logits = cluster_kmeans(features, num_classes)
-                pred_cosine = cluster_kmeans(q, num_classes)
+                pred_logits = cluster_kmeans(full_feats, num_classes)
+                pred_cosine = cluster_kmeans(full_qs,    num_classes)
                 log_dict.update({
                     'Plots_Seg_Kmeans/logits/z': wandb.Image(vol_u8[IDX], masks={
                         'predictions':  {'mask_data': pred_logits[IDX] },
@@ -396,8 +401,8 @@ if __name__ == '__main__':
                 })
 
                 # PCA Visualization
-                pcs_logits = project_pca(features)
-                pcs_cosine = project_pca(q)
+                pcs_logits = project_pca(full_feats)
+                pcs_cosine = project_pca(full_qs)
                 log_dict.update({
                     'Plots_Feat/pca/logits/z': wandb.Image(pcs_logits[IDX]),
                     'Plots_Feat/pca/logits/y': wandb.Image(pcs_logits[:, IDX]),
