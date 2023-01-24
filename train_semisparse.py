@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torchmetrics import JaccardIndex
 import os
+from tqdm import trange
 
 from torchvtk.utils import make_4d, make_5d
 
@@ -42,7 +43,7 @@ class PrintLayer(nn.Module):
 def conv_layer(n_in, n_out, Norm, Act):
     return nn.Sequential(
         nn.Conv3d(n_in, n_out, kernel_size=3, stride=1, padding=0),
-        #Norm(n_out // 4, n_out),
+        Norm(n_out // 4, n_out),
         #CenterCrop(),
         Act(inplace=True)
     )
@@ -79,7 +80,7 @@ if __name__ == '__main__':
 
     # Setup
     BG_CLASS = args.background_class
-    NEG_COUNT = int(2**15)
+    NEG_COUNT = int(2**16)
     FP16 = not args.fp32
     DOWNSAMPLE = args.vol_scaling_factor != 1.0
     NORMALIZE = not args.raw_data
@@ -181,7 +182,7 @@ if __name__ == '__main__':
     opt = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     sched = LR_SCHED(opt)
 
-    for i in range(args.iterations):
+    for i in trange(args.iterations):
         # Draw voxel samples to work with
         with torch.no_grad():
             pos_samples = { # Pick samples_per_class indices to `class_indices`
@@ -194,7 +195,6 @@ if __name__ == '__main__':
             }
             pos_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n:           class_indices[n][v] for n,v in pos_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*2, 1, Z,Y,X)
             neg_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n: different_class_indices[n][v] for n,v in neg_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*N, 1, Z,Y,X)
-            print('Crops: ', pos_crops.shape, neg_crops.shape)
             crops = torch.cat([pos_crops, neg_crops], dim=0) # (C*2 + C*N, IN, Z,Y,X)
         opt.zero_grad()
         # 1 Feed volume thru networks
@@ -202,11 +202,12 @@ if __name__ == '__main__':
             features = model(crops).squeeze() # (C*2 + C*N, F, 1,1,1)
             pos_feat = features[:2*(num_classes-1) ].reshape(num_classes-1, 2, NF)         # ((C-1)*2, F)
             neg_feat = features[ 2*(num_classes-1):].reshape(num_classes-1, NEG_COUNT, NF) # ( C*N,    F)
-            print('pos_feat: ', pos_feat.shape)
-            print('neg_feat: ', neg_feat.shape)
             pos_q, neg_q = F.normalize(pos_feat, dim=-1), F.normalize(neg_feat, dim=-1)
         # 2 Choose samples from classes
         if args.debug:
+            print('Crops: ', pos_crops.shape, neg_crops.shape)
+            print('pos_feat: ', pos_feat.shape)
+            print('neg_feat: ', neg_feat.shape)
             print('pos_samples')
             pprint.pprint({k: v.shape for k,v in pos_samples.items()})
             print('neg_samples')
@@ -265,30 +266,24 @@ if __name__ == '__main__':
                 )
 
 
-            if (i == args.iterations-1) or (i % 100 == 0 and not args.no_validation):
+            if (i == args.iterations-1) or (i % 1000 == 0 and not args.no_validation):
                 with torch.autocast('cuda', enabled=True, dtype=typ):
                     full_feats = model(F.pad(make_5d(vol), tuple([REC_FIELD//2]*6)))
                     full_qs = F.normalize(full_feats, dim=1)
-                    print('full_feats: ', full_feats.shape)
-                    print('class_indices:')
-                    pprint.pprint({n:v.shape for n,v in class_indices.items()})
-                    for n,v in class_indices.items():
-                        print(full_feats[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)).shape)
-                    cluster_center_l2  = torch.nan_to_num(torch.stack([ full_feats[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
-                    cluster_center_cos = torch.nan_to_num(torch.stack([    full_qs[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
+                    cc_l2  = torch.nan_to_num(torch.stack([ full_feats[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
+                    cc_cos = torch.nan_to_num(torch.stack([    full_qs[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
 
                 # Distance to cluster centers
-                l2_center_distances = torch.pow(full_feats - cluster_center_l2[:,:,None,None,None].expand(-1, -1, 1, 1, 1), 2.0).sum(dim=1).sqrt()
+                l2_center_distances = torch.pow(full_feats - cc_l2[:,:,None,None,None].expand(-1, -1, 1, 1, 1), 2.0).sum(dim=1).sqrt()
                 # Get closest (i.e. segmentation) cluster center class
                 l2_closest = l2_center_distances.argmin(dim=0)
                 # Distance to cluster center map
                 l2_distance_map = torch.exp(-l2_center_distances)
                 # Cosine distances as distance map
-                cos_center_distances = torch.clamp(torch.einsum('fdhw,nf->ndhw', (full_qs.squeeze(0), cluster_center_cos)), 0, 1)
+                cos_center_distances = torch.clamp(torch.einsum('fdhw,nf->ndhw', (full_qs.squeeze(0), cc_cos)), 0, 1)
                 # Get (cosine distance) closest cluster center segmentation
                 cos_closest = cos_center_distances.argmax(dim=0)
                 # Compute IoUs
-                print(l2_closest.shape, mask.shape)
                 l2_iou = jaccard(l2_closest.cpu(), mask)
                 jaccard.reset()
                 best_logit_iou = torch.stack([best_logit_iou, l2_iou], dim=0).max(0).values
@@ -360,8 +355,8 @@ if __name__ == '__main__':
                 })
 
                 # Similarity / ClusterDistance matrices
-                cos_sim = similarity_matrix(cluster_center_cos.float(), 'cosine')
-                l2_sim  = similarity_matrix(cluster_center_l2.float(),   'l2')
+                cos_sim = similarity_matrix(cc_cos.float(), 'cosine')
+                l2_sim  = similarity_matrix(cc_l2.float(),   'l2')
                 cos_sim_fig = plot_similarity_matrix(cos_sim.cpu(), list(label_dict.values()), 'cosine')
                 l2_sim_fig  = plot_similarity_matrix(l2_sim.cpu(),  list(label_dict.values()), 'l2')
                 close_plot = True
