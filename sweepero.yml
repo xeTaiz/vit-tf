@@ -1,0 +1,26 @@
+program: train_semisup_sparse.py
+method: grid
+name: SweepMaLife
+metric:
+  name: BestIoU/lung
+  goal: maximize
+parameters:
+  data:
+    values: [data/CT-ORG/volume_010.pt, data/CT-ORG/volume_012.pt]
+  lr-schedule:
+    value: 'onecycle'
+  cnn-layers:
+    value: [8, 16, 32, 64]
+  hidden-size:
+    value: 64
+  iterations:
+    value: 50000
+  samples-per-iteration:
+    values: [4096, 8192, 16384]
+  supports-per-class:
+    values: [128, 256, 512]
+  label-percentage:
+    values: [0.1, 0.2, 0.5]
+  learning_rate:
+    values: [1e-6,1e-5,1e-4,1e-3,1e-2]
+project: ntf
