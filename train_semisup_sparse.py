@@ -114,7 +114,7 @@ class NTF(nn.Module):
 
 if __name__ == '__main__':
     parser = ArgumentParser('Contrastive TF Design')
-    parser.add_argument('data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
+    parser.add_argument('--data', required=True, type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
     parser.add_argument('--unlabeled-class', type=str, default='unlabeled', help='Name of the background class')
     parser.add_argument('--vol-scaling-factor', type=float, default=1.0, help='Scaling factor to reduce spatial resolution of volumes')
     parser.add_argument('--no-pos-encoding', action='store_true', help='Use positional encoding with input (3D coordinate)')
@@ -221,7 +221,7 @@ if __name__ == '__main__':
     else:
         vol = vol[None]
 
-    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 32, 16]
+    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 16, 32, 64]
     NF = args.cnn_layers[-1]
     model = NTF(in_dim=vol.size(0), conv_layers=args.cnn_layers, hidden_sz=args.hidden_size, out_classes=num_classes).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1

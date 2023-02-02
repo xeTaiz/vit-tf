@@ -6,11 +6,9 @@ metric:
   goal: maximize
 parameters:
   data:
-    values: [data/CT-ORG/volume_010.pt, data/CT-ORG/volume_012.pt]
+    values: ['data/CT-ORG/volume_010.pt', 'data/CT-ORG/volume_012.pt']
   lr-schedule:
     value: 'onecycle'
-  cnn-layers:
-    value: [8, 16, 32, 64]
   hidden-size:
     value: 64
   iterations:
@@ -21,6 +19,6 @@ parameters:
     values: [128, 256, 512]
   label-percentage:
     values: [0.1, 0.2, 0.5]
-  learning_rate:
+  learning-rate:
     values: [1e-6,1e-5,1e-4,1e-3,1e-2]
 project: ntf

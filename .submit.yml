@@ -1,5 +1,5 @@
 gpus: 2080ti
-max-time: 0-4
+max-time: 3-0
 pytorch: 1.13.1-cuda11.6-cudnn8-runtime
 requirements: requirements.txt
 apt-install: [sudo, git]
