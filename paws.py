@@ -10,7 +10,6 @@ def snn(query, support, labels, tau=0.1):
     s = F.normalize(support, dim=1)    # (M, F)
     # (BS, F) @ (F, M) -> (BS, M)
     # (BS, M) @ (M, C) -> (BS, C)
-    #return F.softmax(torch.einsum('bf,mcf->bmc', (q, s)), dim=1)
     return F.softmax(q @ s.T / tau, dim=1) @ labels
 
 def paws_loss(anchor_views, anchor_supports, anchor_labels,
@@ -29,7 +28,6 @@ def paws_loss(anchor_views, anchor_supports, anchor_labels,
     memax_loss = -torch.sum(torch.log(avg_probs**(-avg_probs)))
     if clas_pred is not None:
         clas_targ = torch.cat([anchor_labels, sharpen(probs.detach(), T=temperature)], dim=0)
-        # clas_loss = torch.mean(torch.sum(torch.log(clas_pred.softmax(dim=1)**(-clas_targ)), dim=1))
         clas_loss = F.cross_entropy(clas_pred, clas_targ)
         return loss, memax_loss, clas_loss
     else:

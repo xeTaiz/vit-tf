@@ -51,8 +51,8 @@ def plot_confusion_matrix(confusion, labels):
         for j in range(confusion.size(1)):
             ax.text(x=j, y=i, s=confusion[i,j].item(), va='center', ha='center', size='large')
     ax.set_title(f'Confusion Matrix')
-    ax.set_xlabel('Predictions', fontsize=16)
-    ax.set_ylabel('Targets', fontsize=16)
+    ax.set_xlabel('Targets', fontsize=16)
+    ax.set_ylabel('Predictions', fontsize=16)
     ax.set_xticks(range(len(labels)), labels, rotation=90)
     ax.set_yticks(range(len(labels)), labels)
     return fig
