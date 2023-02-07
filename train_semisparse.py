@@ -82,8 +82,8 @@ if __name__ == '__main__':
     parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
-    parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
-    parser.add_argument('--linear-layers', type=int, nargs='*', help='Number of features for linear layers after convs (per voxel)')
+    parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
+    parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
     parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
     parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
     args = parser.parse_args()
@@ -178,8 +178,9 @@ if __name__ == '__main__':
     log_tensor(vol, 'vol')
     log_tensor(lowres_vol, 'lowres_vol')
 
-    args.cnn_layers    = args.cnn_layers    if args.cnn_layers    else [8, 16, 32]
-    args.linear_layers = args.linear_layers if args.linear_layers else [32]
+    
+    args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32]
+    args.linear_layers = [int(n.strip()) for n in args.linear_layers.replace('[', '').replace(']', '').split(' ')] if args.linear_layers else [32]
     NF = args.cnn_layers[-1]
     model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
