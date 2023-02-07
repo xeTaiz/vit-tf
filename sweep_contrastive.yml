@@ -10,12 +10,12 @@ parameters:
   lr-schedule:
     value: 'onecycle'
   cnn-layers:
-    value: [8, 16, 32]
+    value: '8 16 32'
   linear-layers:
     values:
-      - [32]
-      - [32, 32]
-      - [32, 32, 32]
+      - '32'
+      - '32 32'
+      - '32 32 32'
   iterations:
     value: 50000
   label-percentage:
