@@ -254,9 +254,9 @@ if __name__ == '__main__':
         loss = F.cross_entropy(sim, labels)
 
         scaler.scale(loss).backward()
+        sched.step()
         scaler.step(opt)
         scaler.update()
-        sched.step()
         # Validate
         with torch.no_grad():
             log_dict = {
@@ -300,7 +300,7 @@ if __name__ == '__main__':
                 )
 
 
-            if (i == args.iterations-1) or (i % 1000 == 0 and not args.no_validation):
+            if (i == args.iterations-1) or (i % 5000 == 0 and not args.no_validation):
                 with torch.autocast('cuda', enabled=True, dtype=typ):
                     full_feats = model(F.pad(make_5d(lowres_vol), tuple([REC_FIELD//2]*6)))
                     full_qs = F.normalize(full_feats, dim=1)
