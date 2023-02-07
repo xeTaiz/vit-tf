@@ -44,20 +44,27 @@ class PrintLayer(nn.Module):
         print(x.shape)
         return x
 
-def conv_layer(n_in, n_out, Norm, Act):
+def conv_layer(n_in, n_out, Norm, Act, ks=3):
     return nn.Sequential(
-        nn.Conv3d(n_in, n_out, kernel_size=3, stride=1, padding=0),
+        nn.Conv3d(n_in, n_out, kernel_size=ks, stride=1, padding=0),
         Norm(n_out // 4, n_out),
-        #CenterCrop(),
         Act(inplace=True)
     )
 
-def create_cnn(in_dim, n_features=[8, 32, 16], Act=nn.Mish, Norm=nn.GroupNorm):
-    feats = [in_dim] + n_features[:-1]
+def create_cnn(in_dim, n_features=[8, 16, 32], n_linear=[32], Act=nn.Mish, Norm=nn.GroupNorm):
+    assert isinstance(n_features, list) and len(n_features) > 0
+    assert isinstance(n_linear,   list) and len(n_linear) > 0
+    feats = [in_dim] + n_features
+    lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
+    print('Conv layer features:', feats)
+    print('Linear layer features:', lins)
     layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act)
         for n_in, n_out in zip(feats, feats[1:])]
-    last = nn.Conv3d(n_features[-2], n_features[-1], kernel_size=3, stride=1, padding=0)
-    return nn.Sequential(*layers, last)
+    lin_layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1)
+        for n_in, n_out in zip(lins, lins[1:])]
+    last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
+    last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
+    return nn.Sequential(*layers, *lin_layers, last)
 
 if __name__ == '__main__':
     parser = ArgumentParser('Contrastive TF Design')
@@ -76,6 +83,7 @@ if __name__ == '__main__':
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
     parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
+    parser.add_argument('--linear-layers', type=int, nargs='*', help='Number of features for linear layers after convs (per voxel)')
     parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
     parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
     args = parser.parse_args()
@@ -109,10 +117,6 @@ if __name__ == '__main__':
 
     # Data
     data = torch.load(args.data)
-    # if DOWNSAMPLE:
-    #     vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
-    #     mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
-    # else:
     vol  = data['vol']
     mask = data['mask']
     # Get downsampled volume for validation
@@ -174,15 +178,17 @@ if __name__ == '__main__':
     log_tensor(vol, 'vol')
     log_tensor(lowres_vol, 'lowres_vol')
 
-    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 16, 32, 64]
+    args.cnn_layers    = args.cnn_layers    if args.cnn_layers    else [8, 16, 32]
+    args.linear_layers = args.linear_layers if args.linear_layers else [32]
     NF = args.cnn_layers[-1]
-    model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
+    model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
 
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), mode='offline' if args.debug else 'online')
     wandb.watch(model)
     print(model)
+    print(f'Network uses receiptive field of {REC_FIELD}x{REC_FIELD}x{REC_FIELD}.')
     jaccard = JaccardIndex(num_classes=num_classes, average=None)
     best_logit_iou, best_cosine_iou, best_mlp_iou = torch.zeros(num_classes), torch.zeros(num_classes), torch.zeros(num_classes)
 
