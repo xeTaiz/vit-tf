@@ -13,7 +13,11 @@ def split_squeeze(t, bs, f):
     return (BS, F, X.squeeze(-1), Y.squeeze(-1), Z.squeeze(-1))
 
 def log_tensor(t, name):
-    print(f'{name}: {tuple(t.shape)} in value range [{t.min().item():.3f}, {t.max().item():.3f}] and of type {t.dtype}')
+    if torch.is_tensor(t):
+        print(f'{name}: {tuple(t.shape)} of type {t.dtype} ({t.device.type}) in value range [{t.min().item():.3f}, {t.max().item():.3f}]')
+    else:
+        print(f'{name}: {tuple(t.shape)} of type {t.dtype} (numpy) in value range [{t.min().item():.3f}, {t.max().item():.3f}]')
+
 
 def norm_minmax(t):
     mi, ma = t.min(), t.max()

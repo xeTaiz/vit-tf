@@ -149,7 +149,7 @@ if __name__ == '__main__':
     else:
         vol = vol[None]
 
-    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 32, 16]
+    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 16, 32, 64]
     NF = args.cnn_layers[-1]
     model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1

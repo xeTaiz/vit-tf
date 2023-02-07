@@ -61,7 +61,7 @@ def create_cnn(in_dim, n_features=[8, 32, 16], Act=nn.Mish, Norm=nn.GroupNorm):
 
 if __name__ == '__main__':
     parser = ArgumentParser('Contrastive TF Design')
-    parser.add_argument('data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
+    parser.add_argument('--data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
     parser.add_argument('--background-class', type=str, default='background', help='Name of the background class')
     parser.add_argument('--vol-scaling-factor', type=float, default=0.25, help='Scaling factor to reduce spatial resolution of volumes')
     parser.add_argument('--no-pos-encoding', action='store_true', help='Use positional encoding with input (3D coordinate)')
@@ -116,11 +116,11 @@ if __name__ == '__main__':
     vol  = data['vol']
     mask = data['mask']
     # Get downsampled volume for validation
-    lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.vol_scaling_factor, mode='nearest')
+    lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
     lowres_mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
     vol_u8 = (255.0 * (lowres_vol - lowres_vol.min()) / (lowres_vol.max() - lowres_vol.min())).squeeze().cpu().numpy().astype(np.uint8)
-    log_tensor(vol_u8, 'vol_u8')
     lowres_vol = lowres_vol.to(typ).to(dev)
+
     IDX = min(lowres_vol.shape[-3:]) // 2
     num_classes = len(data['labels'])
     IDX_UP = get_index_upscale_function(args.vol_scaling_factor, device=dev)
@@ -138,7 +138,7 @@ if __name__ == '__main__':
         mask_reduced[split_squeeze3d(to_drop)] = 0
     else:
         mask_reduced = lowres_mask
-    
+
     class_indices = {
         n: (mask_reduced == i).nonzero().to(dev)
         for i, n in enumerate(data['labels'])
@@ -152,9 +152,11 @@ if __name__ == '__main__':
         num_classes -= 1
 
     if NORMALIZE:
-        vol = ((vol - vol.mean()) / vol.std()).to(typ).to(dev)
+        vol = ((vol.float() - vol.float().mean()) / vol.float().std()).to(typ).to(dev)
+        lowres_vol = ((lowres_vol.float() - lowres_vol.float().mean()) / lowres_vol.float().std()).to(typ).to(dev)
     else:
         vol = vol.to(typ).to(dev)
+        lowres_vol = lowres_vol.to(typ).to(dev)
 
     if POS_ENCODING:
         x = torch.linspace(-1, 1, vol.size(-1), device=dev, dtype=typ)
@@ -162,11 +164,17 @@ if __name__ == '__main__':
         z = torch.linspace(-1, 1, vol.size(-3), device=dev, dtype=typ)
         z, y, x = torch.meshgrid(z, y, x, indexing="ij")
         coords = torch.stack((z, y, x)) * 1.7185
-        vol = torch.cat([vol[None], coords], dim=0)
+        vol = torch.cat([make_4d(vol), coords], dim=0)
+        lowres_coords = F.interpolate(make_5d(coords), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze(0)
+        lowres_vol = torch.cat([make_4d(lowres_vol), lowres_coords], dim=0)
     else:
-        vol = vol[None]
+        vol = make_4d(vol)
 
-    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 32, 16]
+    log_tensor(vol_u8, 'vol_u8')
+    log_tensor(vol, 'vol')
+    log_tensor(lowres_vol, 'lowres_vol')
+
+    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 16, 32, 64]
     NF = args.cnn_layers[-1]
     model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
@@ -179,18 +187,19 @@ if __name__ == '__main__':
     best_logit_iou, best_cosine_iou, best_mlp_iou = torch.zeros(num_classes), torch.zeros(num_classes), torch.zeros(num_classes)
 
     sample_idxs = { n: l.size(0) for n, l in class_indices.items() }
-    print('Volume Indices for each class:')
-    pprint.pprint({n: v.shape for n, v in class_indices.items()})
     print('Number of annotations per class:')
     pprint.pprint(sample_idxs)
 
     # Dictionary that maps class to indices that are of a DIFFERENT class, for picking negatives
     different_class_indices = { n: torch.cat([v for m,v in class_indices.items() if m != n], dim=0) for n in class_indices.keys() }
     different_sample_idxs = { n: v.size(0) for n,v in different_class_indices.items() }
-    print('Indices for negative samples for each class:')
-    pprint.pprint({n: v.shape for n, v in different_class_indices.items()})
-    print('Number of negative samples for each class:')
-    pprint.pprint(different_sample_idxs)
+    if args.debug:
+        print('Volume Indices for each class:')
+        pprint.pprint({n: v.shape for n, v in class_indices.items()})
+        print('Indices for negative samples for each class:')
+        pprint.pprint({n: v.shape for n, v in different_class_indices.items()})
+        print('Number of negative samples for each class:')
+        pprint.pprint(different_sample_idxs)
 
     close_plot = False
 
@@ -203,15 +212,15 @@ if __name__ == '__main__':
         # Draw voxel samples to work with
         with torch.no_grad():
             pos_samples = { # Pick samples_per_class indices to `class_indices`
-                n: IDX_UP(torch.multinomial(ONE.expand(v), 2))
+                n: torch.multinomial(ONE.expand(v), 2)
                 for n,v in sample_idxs.items() if v >= 2 and n != BG_CLASS
             }
             neg_samples = { # Pick samples_per_class indices to `class_indices`
-                n: IDX_UP(torch.multinomial(ONE.expand(v), NEG_COUNT))
+                n: torch.multinomial(ONE.expand(v), NEG_COUNT)
                 for n,v in different_sample_idxs.items() if n != BG_CLASS
             }
-            pos_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n:           class_indices[n][v] for n,v in pos_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*2, 1, Z,Y,X)
-            neg_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n: different_class_indices[n][v] for n,v in neg_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*N, 1, Z,Y,X)
+            pos_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n:           IDX_UP(class_indices[n][v]) for n,v in pos_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*2, 1, Z,Y,X)
+            neg_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n: IDX_UP(different_class_indices[n][v]) for n,v in neg_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*N, 1, Z,Y,X)
             crops = torch.cat([pos_crops, neg_crops], dim=0) # (C*2 + C*N, IN, Z,Y,X)
         opt.zero_grad()
         # 1 Feed volume thru networks
@@ -222,9 +231,11 @@ if __name__ == '__main__':
             pos_q, neg_q = F.normalize(pos_feat, dim=-1), F.normalize(neg_feat, dim=-1)
         # 2 Choose samples from classes
         if args.debug:
-            print('Crops: ', pos_crops.shape, neg_crops.shape)
-            print('pos_feat: ', pos_feat.shape)
-            print('neg_feat: ', neg_feat.shape)
+            log_tensor(pos_crops, 'pos_crops')
+            log_tensor(neg_crops, 'neg_crops')
+            log_tensor(pos_feat, 'pos_feat')
+            log_tensor(neg_feat, 'neg_feat')
+
             print('pos_samples')
             pprint.pprint({k: v.shape for k,v in pos_samples.items()})
             print('neg_samples')
@@ -291,9 +302,9 @@ if __name__ == '__main__':
                     cc_cos = torch.nan_to_num(torch.stack([    full_qs[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
 
                 # Distance to cluster centers
-                l2_center_distances = torch.pow(full_feats - cc_l2[:,:,None,None,None].expand(-1, -1, 1, 1, 1), 2.0).sum(dim=1).sqrt()
+                l2_center_distances = torch.pow(full_feats - cc_l2[:,:,None,None,None].expand(-1, -1, 1, 1, 1), 2.0).sum(dim=1).sqrt().squeeze(0)
                 # Get closest (i.e. segmentation) cluster center class
-                l2_closest = l2_center_distances.argmin(dim=0)
+                l2_closest = l2_center_distances.argmin(dim=0).to(torch.uint8)
                 # Distance to cluster center map
                 l2_distance_map = torch.exp(-l2_center_distances)
                 # Cosine distances as distance map
@@ -301,10 +312,10 @@ if __name__ == '__main__':
                 # Get (cosine distance) closest cluster center segmentation
                 cos_closest = cos_center_distances.argmax(dim=0)
                 # Compute IoUs
-                l2_iou = jaccard(l2_closest.cpu(), mask)
+                l2_iou = jaccard(l2_closest.cpu(), lowres_mask)
                 jaccard.reset()
                 best_logit_iou = torch.stack([best_logit_iou, l2_iou], dim=0).max(0).values
-                cos_iou = jaccard(cos_closest.cpu(), mask)
+                cos_iou = jaccard(cos_closest.cpu(), lowres_mask)
                 jaccard.reset()
                 best_cosine_iou = torch.stack([best_cosine_iou, cos_iou], dim=0).max(0).values
                 log_dict.update({
@@ -348,27 +359,27 @@ if __name__ == '__main__':
                 })
                 log_dict['Plots_Seg_L2dist/z'] = wandb.Image(vol_u8[IDX], masks={
                     'predictions':  {'mask_data': l2_closest[IDX].cpu().numpy(),   'class_labels': label_dict },
-                    'ground_truth': {'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
+                    'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict }
                 })
                 log_dict['Plots_Seg_L2dist/y'] = wandb.Image(vol_u8[:, IDX], masks={
                     'predictions':  {'mask_data': l2_closest[:, IDX].cpu().numpy(),   'class_labels': label_dict },
-                    'ground_truth': {'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict }
+                    'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
                 })
                 log_dict['Plots_Seg_L2dist/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
                     'predictions':  {'mask_data': l2_closest[:, :, IDX].cpu().numpy(),   'class_labels': label_dict },
-                    'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
+                    'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
                 })
                 log_dict['Plots_Seg_CosDist/z'] = wandb.Image(vol_u8[IDX], masks={
                     'predictions':  {'mask_data': cos_closest[IDX].cpu().numpy(),  'class_labels': label_dict },
-                    'ground_truth': {'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
+                    'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict }
                 })
                 log_dict['Plots_Seg_CosDist/y'] = wandb.Image(vol_u8[:, IDX], masks={
                     'predictions':  {'mask_data': cos_closest[:, IDX].cpu().numpy(),  'class_labels': label_dict },
-                    'ground_truth': {'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict }
+                    'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
                 })
                 log_dict['Plots_Seg_CosDist/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
                     'predictions':  {'mask_data': cos_closest[:, :, IDX].cpu().numpy(),  'class_labels': label_dict },
-                    'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
+                    'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
                 })
 
                 # Similarity / ClusterDistance matrices
@@ -388,15 +399,15 @@ if __name__ == '__main__':
                 log_dict.update({
                     'Plots_Seg_Kmeans/logits/z': wandb.Image(vol_u8[IDX], masks={
                         'predictions':  {'mask_data': pred_logits[IDX] },
-                        'ground_truth': {'mask_data': mask[IDX].numpy(), 'class_labels': label_dict}
+                        'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict}
                     }),
                     'Plots_Seg_Kmeans/logits/y': wandb.Image(vol_u8[:, IDX], masks={
                         'predictions':  {'mask_data': pred_logits[:, IDX] },
-                        'ground_truth': {'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict}
+                        'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict}
                     }),
                     'Plots_Seg_Kmeans/logits/x': wandb.Image(vol_u8[:, :, IDX], masks={
                         'predictions':  {'mask_data': pred_logits[:, :, IDX] },
-                        'ground_truth': {'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict}
+                        'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict}
                     }),
                     'Plots_Seg_Kmeans/cosine/z': wandb.Image(vol_u8[IDX], masks={
                         'predictions':  { 'mask_data': pred_cosine[IDX] },
@@ -404,11 +415,11 @@ if __name__ == '__main__':
                     }),
                     'Plots_Seg_Kmeans/cosine/y': wandb.Image(vol_u8[:, IDX], masks={
                         'predictions':  { 'mask_data': pred_cosine[:, IDX] },
-                        'ground_truth': { 'mask_data': mask[:, IDX].numpy(), 'class_labels': label_dict }
+                        'ground_truth': { 'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
                     }),
                     'Plots_Seg_Kmeans/cosine/x': wandb.Image(vol_u8[:, :, IDX], masks={
                         'predictions':  { 'mask_data': pred_cosine[:, :, IDX] },
-                        'ground_truth': { 'mask_data': mask[:, :, IDX].numpy(), 'class_labels': label_dict }
+                        'ground_truth': { 'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
                     })
                 })
 
