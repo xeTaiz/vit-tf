@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -9,6 +11,9 @@ def split_squeeze(t, bs, f):
     BS = torch.arange(bs)[:, None, None].expand(bs, f, n)
     F =  torch.arange(f)[None, :, None].expand(bs, f, n)
     return (BS, F, X.squeeze(-1), Y.squeeze(-1), Z.squeeze(-1))
+
+def log_tensor(t, name):
+    print(f'{name}: {tuple(t.shape)} in value range [{t.min().item():.3f}, {t.max().item():.3f}] and of type {t.dtype}')
 
 def norm_minmax(t):
     mi, ma = t.min(), t.max()
@@ -125,3 +130,13 @@ def transform_paws_crops(crops, noise_std=0.05, flip=True, permute=True):
         positiv = positiv.flip(dims=[i for i,f in enumerate(flips.tolist()[3:]) if f])
 
     return torch.cat([anchors, positiv], dim=0)
+
+class CenterCrop(nn.Module):
+    def __init__(self, ks=3):
+        super().__init__()
+        self.pad = ks // 2
+
+    def forward(self, x):
+        i = self.pad
+        out = x[..., i:-i, i:-i, i:-i]
+        return out

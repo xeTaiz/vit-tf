@@ -29,9 +29,6 @@ pltkwargs = {
     'tight_layout': True
 }
 
-def log_tensor(t, name):
-    print(f'{name}: {tuple(t.shape)} in value range [{t.min().item():.3f}, {t.max().item():.3f}] and of type {t.dtype}')
-
 class CenterCrop(nn.Module):
     def __init__(self, ks=3):
         super().__init__()

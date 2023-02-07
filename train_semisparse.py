@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from torchmetrics import JaccardIndex
-import os
+import os, random
 from tqdm import trange
 
 from torchvtk.utils import make_4d, make_5d
@@ -24,15 +24,19 @@ pltkwargs = {
     'tight_layout': True
 }
 
-class CenterCrop(nn.Module):
-    def __init__(self, ks=3):
-        super().__init__()
-        self.pad = ks // 2
+def get_index_upscale_function(vol_scaling_factor, device=None):
+    up = int(1./vol_scaling_factor)
+    x,y,z = torch.meshgrid(torch.arange(up), torch.arange(up), torch.arange(up), indexing='ij')
+    mg = torch.stack([x,y,z], dim=-1).reshape(-1, 3)
+    if device is not None:
+        mg = mg.to(device)
+        def idx_up(idx):
+            return idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))]
+    else:
+        def idx_up(idx):
+            return idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))].to(idx.device)
 
-    def forward(self, x):
-        i = self.pad
-        out = x[..., i:-i, i:-i, i:-i]
-        return out
+    return idx_up
 
 class PrintLayer(nn.Module):
     def __init__(self): super().__init__()
@@ -73,10 +77,17 @@ if __name__ == '__main__':
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
     parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
     parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
+    parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
     args = parser.parse_args()
+
+    # Determinism
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
 
     if args.debug:
         os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+        torch.autograd.set_detect_anomaly(True)
 
     # Setup
     BG_CLASS = args.background_class
@@ -98,30 +109,36 @@ if __name__ == '__main__':
 
     # Data
     data = torch.load(args.data)
-    if DOWNSAMPLE:
-        vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
-        mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
-    else:
-        vol  = data['vol']
-        mask = data['mask']
-    IDX = min(vol.shape[-3:])//2
-    vol_u8 = ((vol - vol.min()) * 255.0 / (vol.max() - vol.min())).cpu().numpy().astype(np.uint8)
+    # if DOWNSAMPLE:
+    #     vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
+    #     mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
+    # else:
+    vol  = data['vol']
+    mask = data['mask']
+    # Get downsampled volume for validation
+    lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.vol_scaling_factor, mode='nearest')
+    lowres_mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
+    vol_u8 = (255.0 * (lowres_vol - lowres_vol.min()) / (lowres_vol.max() - lowres_vol.min())).squeeze().cpu().numpy().astype(np.uint8)
+    log_tensor(vol_u8, 'vol_u8')
+    lowres_vol = lowres_vol.to(typ).to(dev)
+    IDX = min(lowres_vol.shape[-3:]) // 2
     num_classes = len(data['labels'])
+    IDX_UP = get_index_upscale_function(args.vol_scaling_factor, device=dev)
     label_dict = {i: n for i,n in enumerate(data['labels'])}
     label2idx =  {n: i for i,n in label_dict.items()}
 
     if args.label_percentage < 1.0:
-        non_bg_indices = [(mask == i).nonzero() for i in range(len(data['labels']))]
+        non_bg_indices = [(lowres_mask == i).nonzero() for i in range(len(data['labels']))]
         # Choose 1 - label_pct non-bg samples to set to background
         to_drop = torch.cat([clas_idcs[torch.multinomial(
             ONE.cpu().expand(clas_idcs.size(0)),
             int((1.0 - args.label_percentage) * clas_idcs.size(0))
         )] for clas_idcs in non_bg_indices if clas_idcs.size(0) > 0], dim=0)
-        mask_reduced = mask.clone()
+        mask_reduced = lowres_mask.clone()
         mask_reduced[split_squeeze3d(to_drop)] = 0
     else:
-        mask_reduced = mask
-
+        mask_reduced = lowres_mask
+    
     class_indices = {
         n: (mask_reduced == i).nonzero().to(dev)
         for i, n in enumerate(data['labels'])
@@ -186,11 +203,11 @@ if __name__ == '__main__':
         # Draw voxel samples to work with
         with torch.no_grad():
             pos_samples = { # Pick samples_per_class indices to `class_indices`
-                n: torch.multinomial(ONE.expand(v), 2)
+                n: IDX_UP(torch.multinomial(ONE.expand(v), 2))
                 for n,v in sample_idxs.items() if v >= 2 and n != BG_CLASS
             }
             neg_samples = { # Pick samples_per_class indices to `class_indices`
-                n: torch.multinomial(ONE.expand(v), NEG_COUNT)
+                n: IDX_UP(torch.multinomial(ONE.expand(v), NEG_COUNT))
                 for n,v in different_sample_idxs.items() if n != BG_CLASS
             }
             pos_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n:           class_indices[n][v] for n,v in pos_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*2, 1, Z,Y,X)
@@ -268,7 +285,7 @@ if __name__ == '__main__':
 
             if (i == args.iterations-1) or (i % 1000 == 0 and not args.no_validation):
                 with torch.autocast('cuda', enabled=True, dtype=typ):
-                    full_feats = model(F.pad(make_5d(vol), tuple([REC_FIELD//2]*6)))
+                    full_feats = model(F.pad(make_5d(lowres_vol), tuple([REC_FIELD//2]*6)))
                     full_qs = F.normalize(full_feats, dim=1)
                     cc_l2  = torch.nan_to_num(torch.stack([ full_feats[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
                     cc_cos = torch.nan_to_num(torch.stack([    full_qs[split_squeeze(v, bs=1, f=NF)].mean(dim=(0,2)) for n,v in class_indices.items() ]))
