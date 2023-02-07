@@ -10,9 +10,7 @@ parameters:
   lr-schedule:
     value: 'onecycle'
   cnn-layers:
-    values:
-      - [8, 16, 32]
-      - [8, 16, 32, 64]
+    value: [8, 16, 32]
   linear-layers:
     values:
       - [32]

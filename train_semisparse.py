@@ -77,7 +77,7 @@ if __name__ == '__main__':
     parser.add_argument('--learning-rate', type=float, default=5e-3, help='Learning rate for optimization')
     parser.add_argument('--weight-decay', type=float, default=1e-3, help='Weight decay for optimizer')
     parser.add_argument('--lr-schedule', type=str, default='onecycle', help='Learning rate schedule')
-    parser.add_argument('--iterations', type=int, default=10001, help='Number of optimization steps')
+    parser.add_argument('--iterations', type=int, default=30000, help='Number of optimization steps')
     parser.add_argument('--samples-per-iteration', type=int, default=32, help='Number of samples per class used in each iteration')
     parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
