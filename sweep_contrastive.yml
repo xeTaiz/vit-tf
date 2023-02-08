@@ -2,24 +2,26 @@ program: train_semisparse.py
 method: grid
 name: SweepContrastive
 metric:
-  name: BestIoU/lung
+  name: BestIoU_cosine/lung
   goal: maximize
 parameters:
   data:
     values: ['data/CT-ORG/volume_010.pt', 'data/CT-ORG/volume_012.pt']
   lr-schedule:
     value: 'onecycle'
+  vol-scaling-factor:
+    value: 0.25
   cnn-layers:
-    value: '8 16 32'
+    value: '8 16 32 32'
   linear-layers:
     values:
       - '32'
       - '32 32'
-      - '32 32 32'
+      - '32 32 32' 
   iterations:
-    value: 50000
+    value: 20000
   label-percentage:
-    values: [0.1, 0.5]
+    value: 0.1
   learning-rate:
     values: [1e-4,1e-3,1e-2]
 project: ntf
