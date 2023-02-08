@@ -26,15 +26,16 @@ pltkwargs = {
 
 def get_index_upscale_function(vol_scaling_factor, device=None):
     up = int(1./vol_scaling_factor)
+    assert up > 1
     x,y,z = torch.meshgrid(torch.arange(up), torch.arange(up), torch.arange(up), indexing='ij')
     mg = torch.stack([x,y,z], dim=-1).reshape(-1, 3)
     if device is not None:
         mg = mg.to(device)
         def idx_up(idx):
-            return idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))]
+            return up*idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))]
     else:
         def idx_up(idx):
-            return idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))].to(idx.device)
+            return up*idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))].to(idx.device)
 
     return idx_up
 
@@ -178,7 +179,7 @@ if __name__ == '__main__':
     log_tensor(vol, 'vol')
     log_tensor(lowres_vol, 'lowres_vol')
 
-    
+
     args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32]
     args.linear_layers = [int(n.strip()) for n in args.linear_layers.replace('[', '').replace(']', '').split(' ')] if args.linear_layers else [32]
     NF = args.cnn_layers[-1]
@@ -225,7 +226,7 @@ if __name__ == '__main__':
             neg_samples = { # Pick samples_per_class indices to `class_indices`
                 n: torch.multinomial(ONE.expand(v), NEG_COUNT)
                 for n,v in different_sample_idxs.items() if n != BG_CLASS
-            }
+            } #                                                             AABBCCDDEEFF   +    NNN....NNNOOO...OOOPPP...PPPQQQ...QQQ...  (NEG_COUNTxN  NEG_COUNTxO  ...)
             pos_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n:           IDX_UP(class_indices[n][v]) for n,v in pos_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*2, 1, Z,Y,X)
             neg_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n: IDX_UP(different_class_indices[n][v]) for n,v in neg_samples.items()}.values()), dim=0), ks=REC_FIELD) # (C*N, 1, Z,Y,X)
             crops = torch.cat([pos_crops, neg_crops], dim=0) # (C*2 + C*N, IN, Z,Y,X)
@@ -250,6 +251,8 @@ if __name__ == '__main__':
             print('pos_indices')
             pprint.pprint({k: class_indices[k][v].shape for k,v in pos_samples.items()})
         # Compute InfoNCE
+        # pos_q is (C, 2, F), neg_q is (C, N, F)
+        #                                    (C, 1, F)   x     (C, 1+N, F)     -> (C, 1, 1+N)
         sim = torch.einsum('cpf,cnf->cpn', [pos_q[:,[0]], torch.cat([pos_q[:,[1]], neg_q], dim=1)]).squeeze(1)
         labels = torch.zeros(sim.size(0), dtype=torch.long, device=dev)
         loss = F.cross_entropy(sim, labels)
