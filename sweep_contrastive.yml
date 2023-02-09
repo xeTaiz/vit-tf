@@ -12,14 +12,15 @@ parameters:
   vol-scaling-factor:
     values: [0.25, 0.5, 1.0]
   label-scaling-factor:
-    value: 0.125
+    value: 0.25
   samples-per-iteration:
     values: [8, 16]
+  residual:
+    values: ['true', 'false']
   cnn-layers:
     value: '8 16 32'
   linear-layers:
     values:
-      - '32'
       - '32 32'
       - '32 32 32'
   iterations:
@@ -27,7 +28,7 @@ parameters:
   label-percentage:
     value: 0.1
   lambda-std:
-    values: [1.0, 10.0]
+    values: [1.0, 10.0, 50.0]
   learning-rate:
     values: [1e-3,1e-2,1e-1]
 project: ntf
