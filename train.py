@@ -135,8 +135,9 @@ if __name__ == '__main__':
     model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
     cls_head = nn.Linear(args.cnn_layers[-1], num_classes).to(dev)
 
+    group = 'Contrastive Dense'
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', *args.wandb_tags]
-    wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args))
+    wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), group=group)
     wandb.watch(model)
     print(model)
     jaccard = JaccardIndex(num_classes=num_classes, average=None)

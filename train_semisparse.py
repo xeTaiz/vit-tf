@@ -68,6 +68,40 @@ def create_cnn(in_dim, n_features=[8, 16, 32], n_linear=[32], Act=nn.Mish, Norm=
     last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
     return nn.Sequential(*layers, *lin_layers, last)
 
+class FeatureExtractor(nn.Module):
+    def __init__(self, in_dim, n_features=[8, 16, 32], n_linear=[32],
+        Act=nn.Mish, Norm=nn.GroupNorm, residual=False):
+        super().__init__()
+        assert isinstance(n_features, list) and len(n_features) > 0
+        assert isinstance(n_linear, list) and len(n_linear) > 0
+        self.residual = residual
+        feats = [in_dim] + n_features
+        if residual:
+            lins = [n_features[-1] + in_dim] + n_linear if len(n_linear) > 0 else []
+            last_in = n_linear[-2] + in_dim if len(n_linear) > 1 else n_features[-1] + in_dim
+            self.crop = CenterCrop(ks=len(n_features)*2)
+        else:
+            lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
+            last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
+
+        convs = [conv_layer(n_in, n_out, Norm=Norm, Act=Act)
+            for n_in, n_out in zip(feats, feats[1:])]
+        lins = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1)
+            for n_in, n_out in zip(lins, lins[1:])]
+        self.convs = nn.Sequential(*convs)
+        self.lins = nn.Sequential(*lins)
+        self.last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        if self.residual:
+            skip = self.crop(x)
+            x = self.convs(x)
+            x = self.lins(torch.cat([skip, x], dim=1))
+            return self.last(torch.cat([skip, x], dim=1))
+        else:
+            return self.last(self.lins(self.convs(x)))
+
+
 if __name__ == '__main__':
     parser = ArgumentParser('Contrastive TF Design')
     parser.add_argument('--data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
@@ -88,6 +122,7 @@ if __name__ == '__main__':
     parser.add_argument('--validation-every', type=int, default=1000, help='Run validation step every n-th iteration')
     parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
     parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
+    parser.add_argument('--residual', action='store_true', help='Use skip connections in network')
     parser.add_argument('--lambda-std', type=float, default=0.0, help='Weighting of standard deviation loss')
     parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
     parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
@@ -190,12 +225,15 @@ if __name__ == '__main__':
     args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32]
     args.linear_layers = [int(n.strip()) for n in args.linear_layers.replace('[', '').replace(']', '').split(' ')] if args.linear_layers else [32]
     NF = args.cnn_layers[-1]
-    model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers).to(dev)
+    model = FeatureExtractor(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers, residual=args.residual).to(dev)
+    # model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
 
     # Logging
+    group = 'Contrastive Sparse'
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
-    wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), mode='offline' if args.debug else 'online')
+    wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args),
+        mode='offline' if args.debug else 'online', group=group)
     wandb.watch(model)
     print(model)
     print(f'Network uses receiptive field of {REC_FIELD}x{REC_FIELD}x{REC_FIELD}.')

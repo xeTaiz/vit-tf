@@ -223,8 +223,10 @@ if __name__ == '__main__':
     model = NTF(in_dim=vol.size(0), conv_layers=args.cnn_layers, hidden_sz=args.hidden_size, out_classes=num_classes).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
 
+    group = 'SemiSupervised Sparse'
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
-    wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), mode='offline' if args.debug else 'online')
+    wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), 
+        mode='offline' if args.debug else 'online', group=group)
     wandb.watch(model)
     jaccard = JaccardIndex(num_classes=num_classes, average=None)
     best_iou = torch.zeros(num_classes)
