@@ -122,7 +122,7 @@ if __name__ == '__main__':
     parser.add_argument('--validation-every', type=int, default=1000, help='Run validation step every n-th iteration')
     parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
     parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
-    parser.add_argument('--residual', action='store_true', help='Use skip connections in network')
+    parser.add_argument('--residual', type=str, choices=['true', 'false'], default='false', help='Use skip connections in network')
     parser.add_argument('--lambda-std', type=float, default=0.0, help='Weighting of standard deviation loss')
     parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
     parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
@@ -225,7 +225,12 @@ if __name__ == '__main__':
     args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32]
     args.linear_layers = [int(n.strip()) for n in args.linear_layers.replace('[', '').replace(']', '').split(' ')] if args.linear_layers else [32]
     NF = args.cnn_layers[-1]
-    model = FeatureExtractor(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers, residual=args.residual).to(dev)
+    model = FeatureExtractor(
+        in_dim=vol.size(0), 
+        n_features=args.cnn_layers, 
+        n_linear=args.linear_layers, 
+        residual=args.residual == 'true'
+    ).to(dev)
     # model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
 
