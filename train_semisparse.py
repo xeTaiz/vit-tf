@@ -26,7 +26,8 @@ pltkwargs = {
 
 def get_index_upscale_function(vol_scaling_factor, device=None):
     up = int(1./vol_scaling_factor)
-    assert up > 1
+    assert up >= 1
+    if up == 1.0: return (lambda x: x)
     x,y,z = torch.meshgrid(torch.arange(up), torch.arange(up), torch.arange(up), indexing='ij')
     mg = torch.stack([x,y,z], dim=-1).reshape(-1, 3)
     if device is not None:
@@ -72,19 +73,22 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
     parser.add_argument('--background-class', type=str, default='background', help='Name of the background class')
     parser.add_argument('--vol-scaling-factor', type=float, default=0.25, help='Scaling factor to reduce spatial resolution of volumes')
+    parser.add_argument('--label-scaling-factor', type=float, default=0.25, help='Scaling factor at which labels are given compared to full volume')
     parser.add_argument('--no-pos-encoding', action='store_true', help='Use positional encoding with input (3D coordinate)')
     parser.add_argument('--raw-data', action='store_true', help='Use raw data and do not normalize input to 0-mean 1-std')
     parser.add_argument('--fp32', action='store_true', help='Use full 32-bit precision')
-    parser.add_argument('--learning-rate', type=float, default=5e-3, help='Learning rate for optimization')
+    parser.add_argument('--learning-rate', type=float, default=1e-2, help='Learning rate for optimization')
     parser.add_argument('--weight-decay', type=float, default=1e-3, help='Weight decay for optimizer')
     parser.add_argument('--lr-schedule', type=str, default='onecycle', help='Learning rate schedule')
-    parser.add_argument('--iterations', type=int, default=30000, help='Number of optimization steps')
-    parser.add_argument('--samples-per-iteration', type=int, default=32, help='Number of samples per class used in each iteration')
+    parser.add_argument('--iterations', type=int, default=10000, help='Number of optimization steps')
+    parser.add_argument('--samples-per-iteration', type=int, default=8, help='Number of samples per class used in each iteration')
     parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
+    parser.add_argument('--validation-every', type=int, default=1000, help='Run validation step every n-th iteration')
     parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
     parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
+    parser.add_argument('--lambda-std', type=float, default=0.0, help='Weighting of standard deviation loss')
     parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
     parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
     args = parser.parse_args()
@@ -99,10 +103,10 @@ if __name__ == '__main__':
         torch.autograd.set_detect_anomaly(True)
 
     # Setup
+    BS = args.samples_per_iteration
     BG_CLASS = args.background_class
     NEG_COUNT = int(2**16)
     FP16 = not args.fp32
-    DOWNSAMPLE = args.vol_scaling_factor != 1.0
     NORMALIZE = not args.raw_data
     POS_ENCODING = not args.no_pos_encoding
     if args.lr_schedule.lower() == 'onecycle':
@@ -117,21 +121,23 @@ if __name__ == '__main__':
     ONE = torch.ones(1, device=dev)
 
     # Data
+    assert args.vol_scaling_factor >= args.label_scaling_factor
     data = torch.load(args.data)
-    vol  = data['vol']
-    mask = data['mask']
+    vol  = F.interpolate(make_5d(data['vol']).float(),  scale_factor=args.vol_scaling_factor, mode='nearest').squeeze(0)
+    mask = F.interpolate(make_5d(data['mask']).float(), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
     # Get downsampled volume for validation
-    lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
-    lowres_mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.vol_scaling_factor, mode='nearest').squeeze()
+    lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.label_scaling_factor, mode='nearest').squeeze()
+    lowres_mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.label_scaling_factor, mode='nearest').squeeze()
     vol_u8 = (255.0 * (lowres_vol - lowres_vol.min()) / (lowres_vol.max() - lowres_vol.min())).squeeze().cpu().numpy().astype(np.uint8)
     lowres_vol = lowres_vol.to(typ).to(dev)
 
     IDX = min(lowres_vol.shape[-3:]) // 2
     num_classes = len(data['labels'])
-    IDX_UP = get_index_upscale_function(args.vol_scaling_factor, device=dev)
+    IDX_UP = get_index_upscale_function(args.label_scaling_factor / args.vol_scaling_factor, device=dev)
     label_dict = {i: n for i,n in enumerate(data['labels'])}
     label2idx =  {n: i for i,n in label_dict.items()}
 
+    # Drop labels from GT to simulate sparse annotations
     if args.label_percentage < 1.0:
         non_bg_indices = [(lowres_mask == i).nonzero() for i in range(len(data['labels']))]
         # Choose 1 - label_pct non-bg samples to set to background
@@ -155,22 +161,23 @@ if __name__ == '__main__':
         del label_dict[i]
         del label2idx[n]
         num_classes -= 1
+    C = num_classes -1
 
-    if NORMALIZE:
-        vol = ((vol.float() - vol.float().mean()) / vol.float().std()).to(typ).to(dev)
-        lowres_vol = ((lowres_vol.float() - lowres_vol.float().mean()) / lowres_vol.float().std()).to(typ).to(dev)
+    if NORMALIZE:  # Input Normalization
+        vol        = norm_mean_std(       vol.float()).to(typ).to(dev)
+        lowres_vol = norm_mean_std(lowres_vol.float()).to(typ).to(dev)
     else:
         vol = vol.to(typ).to(dev)
         lowres_vol = lowres_vol.to(typ).to(dev)
 
-    if POS_ENCODING:
+    if POS_ENCODING:  # Positional Encoding
         x = torch.linspace(-1, 1, vol.size(-1), device=dev, dtype=typ)
         y = torch.linspace(-1, 1, vol.size(-2), device=dev, dtype=typ)
         z = torch.linspace(-1, 1, vol.size(-3), device=dev, dtype=typ)
         z, y, x = torch.meshgrid(z, y, x, indexing="ij")
         coords = torch.stack((z, y, x)) * 1.7185
         vol = torch.cat([make_4d(vol), coords], dim=0)
-        lowres_coords = F.interpolate(make_5d(coords), scale_factor=args.vol_scaling_factor, mode='nearest').squeeze(0)
+        lowres_coords = F.interpolate(make_5d(coords), scale_factor=args.label_scaling_factor / args.vol_scaling_factor, mode='nearest').squeeze(0)
         lowres_vol = torch.cat([make_4d(lowres_vol), lowres_coords], dim=0)
     else:
         vol = make_4d(vol)
@@ -179,13 +186,14 @@ if __name__ == '__main__':
     log_tensor(vol, 'vol')
     log_tensor(lowres_vol, 'lowres_vol')
 
-
+    # Model
     args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32]
     args.linear_layers = [int(n.strip()) for n in args.linear_layers.replace('[', '').replace(']', '').split(' ')] if args.linear_layers else [32]
     NF = args.cnn_layers[-1]
     model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
 
+    # Logging
     tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), mode='offline' if args.debug else 'online')
     wandb.watch(model)
@@ -220,8 +228,8 @@ if __name__ == '__main__':
         # Draw voxel samples to work with
         with torch.no_grad():
             pos_samples = { # Pick samples_per_class indices to `class_indices`
-                n: torch.multinomial(ONE.expand(v), 2)
-                for n,v in sample_idxs.items() if v >= 2 and n != BG_CLASS
+                n: torch.multinomial(ONE.expand(v), BS*2)
+                for n,v in sample_idxs.items() if v >= BS*2 and n != BG_CLASS
             }
             neg_samples = { # Pick samples_per_class indices to `class_indices`
                 n: torch.multinomial(ONE.expand(v), NEG_COUNT)
@@ -233,78 +241,65 @@ if __name__ == '__main__':
         opt.zero_grad()
         # 1 Feed volume thru networks
         with torch.autocast('cuda', enabled=True, dtype=typ):
-            features = model(crops).squeeze() # (C*2 + C*N, F, 1,1,1)
-            pos_feat = features[:2*(num_classes-1) ].reshape(num_classes-1, 2, NF)         # ((C-1)*2, F)
-            neg_feat = features[ 2*(num_classes-1):].reshape(num_classes-1, NEG_COUNT, NF) # ( C*N,    F)
+            features = model(crops).squeeze() # (C*BS*2 + C*N, F, 1,1,1)
+            pos_feat = features[:2*BS*C ].reshape(C, 2, BS, NF)
+            neg_feat = features[ 2*BS*C:].reshape(C, NEG_COUNT, 1, NF)
             pos_q, neg_q = F.normalize(pos_feat, dim=-1), F.normalize(neg_feat, dim=-1)
         # 2 Choose samples from classes
         if args.debug:
-            log_tensor(pos_crops, 'pos_crops')
-            log_tensor(neg_crops, 'neg_crops')
-            log_tensor(pos_feat, 'pos_feat')
-            log_tensor(neg_feat, 'neg_feat')
-
             print('pos_samples')
             pprint.pprint({k: v.shape for k,v in pos_samples.items()})
             print('neg_samples')
             pprint.pprint({k: v.shape for k,v in neg_samples.items()})
-            print('pos_indices')
-            pprint.pprint({k: class_indices[k][v].shape for k,v in pos_samples.items()})
+
+            log_tensor(pos_crops, 'pos_crops')
+            log_tensor(neg_crops, 'neg_crops')
+            log_tensor(pos_feat, 'pos_feat')
+            log_tensor(neg_feat, 'neg_feat')
+            log_tensor(pos_q, 'pos_q')
+            log_tensor(neg_q, 'neg_q')
+
         # Compute InfoNCE
-        # pos_q is (C, 2, F), neg_q is (C, N, F)
-        #                                    (C, 1, F)   x     (C, 1+N, F)     -> (C, 1, 1+N)
-        sim = torch.einsum('cpf,cnf->cpn', [pos_q[:,[0]], torch.cat([pos_q[:,[1]], neg_q], dim=1)]).squeeze(1)
+        #                                (C, 1, BS, F)   x     (C, 1+N, BS, F)     -> (C, 1, BS, 1+N)  ->  (C*BS, 1+N)
+        sim = torch.einsum('cpbf,cnbf->cpbn', [pos_q[:,[0]], torch.cat([pos_q[:,[1]], neg_q.expand(-1, -1, BS, -1)], dim=1)]).squeeze(1).reshape(C*BS, NEG_COUNT+1)
         labels = torch.zeros(sim.size(0), dtype=torch.long, device=dev)
-        loss = F.cross_entropy(sim, labels)
+        infonce_loss = F.cross_entropy(sim, labels)
+        loss = infonce_loss
+
+        # Minimize cluster center standard deviation
+        if args.lambda_std > 0:
+            # cc_l2 = pos_feat.mean(dim=(1,2))
+            with torch.autocast('cuda', enabled=False): # The following .mean() needs to be done in FP32
+                # std_loss = torch.linalg.vector_norm(pos_feat - cc_l2[:, None,None, :], dim=-1).float().mean(dim=(1,2)).sum(0)
+                std_loss = feature_std(pos_feat, reduce_dim=(1,2), feature_dim=-1)
+            loss += args.lambda_std * std_loss.sum(0)
+        else:
+            std_loss = torch.zeros(1)
 
         scaler.scale(loss).backward()
-        sched.step()
         scaler.step(opt)
         scaler.update()
+        sched.step()
         # Validate
         with torch.no_grad():
             log_dict = {
-                'Charts/loss': loss,
+                'Charts/Total_Loss': loss.cpu().item(),
+                'Charts/InfoNCE_Loss': infonce_loss.cpu().item(),
+                'Charts/StdDev_Loss': std_loss.sum(0).cpu().item(),
                 'Charts/learning_rate': sched.get_last_lr()[0]
             }
-            # Compute mean of normalized feature vectors per class -> cluster centers
-            temp_cluster_center_cos = pos_q.mean(dim=1)
-            # Magnitude of mean of normalized feature vectors is distance from 0, should get close to 1 for a decisive cluster
-            cluster_center_cos_magnitude = torch.norm(temp_cluster_center_cos, dim=1)
-            # Re-normalize to get a normalized feature vector as cluster center
-            temp_cluster_center_cos = F.normalize(temp_cluster_center_cos, dim=1)
-            # Cluster centers in logit space are just means of logit features
-            temp_cluster_center_l2  = pos_feat.mean(dim=1)
-            if i > 0: # Distance traveled as cosine distance between old and new cluster center or p-2 norm between old and new
-                cos_dist_traveled = 1.0 - torch.einsum('nf,mf->nm', [cluster_center_cos, temp_cluster_center_cos]).diagonal()
-                l2_dist_traveled = F.pairwise_distance(temp_cluster_center_l2, cluster_center_l2)
-            else:
-                cos_dist_traveled, l2_dist_traveled = torch.zeros(temp_cluster_center_cos.size(0)), torch.zeros(temp_cluster_center_cos.size(0))
-            # Update "old" cluster centers with current "temp" ones
-            cluster_center_l2 = temp_cluster_center_l2
-            cluster_center_cos = temp_cluster_center_cos
 
             # Cluster standard deviations
             log_dict.update({
-                f'StdDev_Cos/{n}': torch.mean((pos_q[2*i:2*i+2].mean(dim=0) - temp_cluster_center_cos[i])**2, dim=0).cpu()
+                f'StdDev_Cos/{n}': feature_std(pos_q[i], reduce_dim=(0,1), feature_dim=-1).cpu()
                 for i,n in enumerate(pos_samples.keys()) }
             )
             log_dict.update({
-                f'StdDev_Logits/{n}': torch.mean((pos_feat[2*i:2*i+2].mean(dim=0) - temp_cluster_center_cos[i])**2, dim=0).cpu()
+                f'StdDev_Logits/{n}': std_loss[i].cpu()
                 for i,n in enumerate(pos_samples.keys()) }
             )
 
-            log_dict.update({
-                    f'CC_Logits_dist_traveled/{n}': l2_dist_traveled[i].cpu()
-                    for i, n in enumerate(pos_samples.keys()) }
-                )
-            log_dict.update({
-                    f'CC_Cosine_dist_traveled/{n}': cos_dist_traveled[i].cpu()
-                    for i, n in enumerate(pos_samples.keys()) }
-                )
-
-
-            if (i == args.iterations-1) or (i % 5000 == 0 and not args.no_validation):
+            if (i == args.iterations-1) or (i % args.validation_every == 0 and not args.no_validation):
                 with torch.autocast('cuda', enabled=True, dtype=typ):
                     full_feats = model(F.pad(make_5d(lowres_vol), tuple([REC_FIELD//2]*6)))
                     full_qs = F.normalize(full_feats, dim=1)
@@ -367,27 +362,27 @@ if __name__ == '__main__':
                     wandb.Image(cos_center_distances.cpu()[i, :, :, IDX])
                     for i, n in enumerate(class_indices.keys())
                 })
-                log_dict['Plots_Seg_L2dist/z'] = wandb.Image(vol_u8[IDX], masks={
+                log_dict['Plots_Seg/L2dist/z'] = wandb.Image(vol_u8[IDX], masks={
                     'predictions':  {'mask_data': l2_closest[IDX].cpu().numpy(),   'class_labels': label_dict },
                     'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict }
                 })
-                log_dict['Plots_Seg_L2dist/y'] = wandb.Image(vol_u8[:, IDX], masks={
+                log_dict['Plots_Seg/L2dist/y'] = wandb.Image(vol_u8[:, IDX], masks={
                     'predictions':  {'mask_data': l2_closest[:, IDX].cpu().numpy(),   'class_labels': label_dict },
                     'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
                 })
-                log_dict['Plots_Seg_L2dist/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
+                log_dict['Plots_Seg/L2dist/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
                     'predictions':  {'mask_data': l2_closest[:, :, IDX].cpu().numpy(),   'class_labels': label_dict },
                     'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
                 })
-                log_dict['Plots_Seg_CosDist/z'] = wandb.Image(vol_u8[IDX], masks={
+                log_dict['Plots_Seg/CosDist/z'] = wandb.Image(vol_u8[IDX], masks={
                     'predictions':  {'mask_data': cos_closest[IDX].cpu().numpy(),  'class_labels': label_dict },
                     'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict }
                 })
-                log_dict['Plots_Seg_CosDist/y'] = wandb.Image(vol_u8[:, IDX], masks={
+                log_dict['Plots_Seg/CosDist/y'] = wandb.Image(vol_u8[:, IDX], masks={
                     'predictions':  {'mask_data': cos_closest[:, IDX].cpu().numpy(),  'class_labels': label_dict },
                     'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
                 })
-                log_dict['Plots_Seg_CosDist/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
+                log_dict['Plots_Seg/CosDist/x'] = wandb.Image(vol_u8[:, :, IDX], masks={
                     'predictions':  {'mask_data': cos_closest[:, :, IDX].cpu().numpy(),  'class_labels': label_dict },
                     'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
                 })
@@ -404,46 +399,46 @@ if __name__ == '__main__':
                 })
 
                 # K-Means clustering
-                pred_logits = cluster_kmeans(full_feats, num_classes)
-                pred_cosine = cluster_kmeans(full_qs,    num_classes)
-                log_dict.update({
-                    'Plots_Seg_Kmeans/logits/z': wandb.Image(vol_u8[IDX], masks={
-                        'predictions':  {'mask_data': pred_logits[IDX] },
-                        'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict}
-                    }),
-                    'Plots_Seg_Kmeans/logits/y': wandb.Image(vol_u8[:, IDX], masks={
-                        'predictions':  {'mask_data': pred_logits[:, IDX] },
-                        'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict}
-                    }),
-                    'Plots_Seg_Kmeans/logits/x': wandb.Image(vol_u8[:, :, IDX], masks={
-                        'predictions':  {'mask_data': pred_logits[:, :, IDX] },
-                        'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict}
-                    }),
-                    'Plots_Seg_Kmeans/cosine/z': wandb.Image(vol_u8[IDX], masks={
-                        'predictions':  { 'mask_data': pred_cosine[IDX] },
-                        'ground_truth': { 'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
-                    }),
-                    'Plots_Seg_Kmeans/cosine/y': wandb.Image(vol_u8[:, IDX], masks={
-                        'predictions':  { 'mask_data': pred_cosine[:, IDX] },
-                        'ground_truth': { 'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
-                    }),
-                    'Plots_Seg_Kmeans/cosine/x': wandb.Image(vol_u8[:, :, IDX], masks={
-                        'predictions':  { 'mask_data': pred_cosine[:, :, IDX] },
-                        'ground_truth': { 'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
-                    })
-                })
+                # pred_logits = cluster_kmeans(full_feats, num_classes)
+                # pred_cosine = cluster_kmeans(full_qs,    num_classes)
+                # log_dict.update({
+                #     'Plots_Seg_Kmeans/logits/z': wandb.Image(vol_u8[IDX], masks={
+                #         'predictions':  {'mask_data': pred_logits[IDX] },
+                #         'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict}
+                #     }),
+                #     'Plots_Seg_Kmeans/logits/y': wandb.Image(vol_u8[:, IDX], masks={
+                #         'predictions':  {'mask_data': pred_logits[:, IDX] },
+                #         'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict}
+                #     }),
+                #     'Plots_Seg_Kmeans/logits/x': wandb.Image(vol_u8[:, :, IDX], masks={
+                #         'predictions':  {'mask_data': pred_logits[:, :, IDX] },
+                #         'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict}
+                #     }),
+                #     'Plots_Seg_Kmeans/cosine/z': wandb.Image(vol_u8[IDX], masks={
+                #         'predictions':  { 'mask_data': pred_cosine[IDX] },
+                #         'ground_truth': { 'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
+                #     }),
+                #     'Plots_Seg_Kmeans/cosine/y': wandb.Image(vol_u8[:, IDX], masks={
+                #         'predictions':  { 'mask_data': pred_cosine[:, IDX] },
+                #         'ground_truth': { 'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
+                #     }),
+                #     'Plots_Seg_Kmeans/cosine/x': wandb.Image(vol_u8[:, :, IDX], masks={
+                #         'predictions':  { 'mask_data': pred_cosine[:, :, IDX] },
+                #         'ground_truth': { 'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
+                #     })
+                # })
 
                 # PCA Visualization
-                pcs_logits = project_pca(full_feats)
-                pcs_cosine = project_pca(full_qs)
-                log_dict.update({
-                    'Plots_Feat/pca/logits/z': wandb.Image(pcs_logits[IDX]),
-                    'Plots_Feat/pca/logits/y': wandb.Image(pcs_logits[:, IDX]),
-                    'Plots_Feat/pca/logits/x': wandb.Image(pcs_logits[:, :, IDX]),
-                    'Plots_Feat/pca/cosine/z': wandb.Image(pcs_cosine[IDX]),
-                    'Plots_Feat/pca/cosine/y': wandb.Image(pcs_cosine[:, IDX]),
-                    'Plots_Feat/pca/cosine/x': wandb.Image(pcs_cosine[:, :, IDX])
-                })
+                # pcs_logits = project_pca(full_feats)
+                # pcs_cosine = project_pca(full_qs)
+                # log_dict.update({
+                #     'Plots_Feat/pca/logits/z': wandb.Image(pcs_logits[IDX]),
+                #     'Plots_Feat/pca/logits/y': wandb.Image(pcs_logits[:, IDX]),
+                #     'Plots_Feat/pca/logits/x': wandb.Image(pcs_logits[:, :, IDX]),
+                #     'Plots_Feat/pca/cosine/z': wandb.Image(pcs_cosine[IDX]),
+                #     'Plots_Feat/pca/cosine/y': wandb.Image(pcs_cosine[:, IDX]),
+                #     'Plots_Feat/pca/cosine/x': wandb.Image(pcs_cosine[:, :, IDX])
+                # })
 
             wandb.log(log_dict)
             if close_plot:

@@ -18,10 +18,35 @@ def log_tensor(t, name):
     else:
         print(f'{name}: {tuple(t.shape)} of type {t.dtype} (numpy) in value range [{t.min().item():.3f}, {t.max().item():.3f}]')
 
+def feature_std(t, reduce_dim=None, feature_dim=-1):
+    ''' Computes standard deviation of feature distances to their mean
+
+    Args:
+        t (torch.Tensor): The tensor to compute the feature standard deviation of
+        reduce_dim (int or tuple or list, optional): Dimensions to reduce over. Defaults to all except `feature_dim`.
+        feature_dim (int, optional): Dimension of the feature to compute distances to their mean over. Defaults to -1.
+
+    Returns:
+        torch.Tensor: Standard deviation of feature distances. Has same shape as input without `reduce_dim` and `feature_dim` dimensions
+    '''
+    if reduce_dim is None: 
+        reduce_dim = list(range(t.ndim))
+        del reduce_dim[feature_dim]
+    else:
+        if isinstance(reduce_dim, (tuple, list)):
+            assert feature_dim not in reduce_dim and (feature_dim + t.ndim) not in reduce_dim
+        else:
+            assert reduce_dim != feature_dim
+    mean = t.mean(dim=reduce_dim)
+    for d in sorted(reduce_dim): mean.unsqueeze_(d)
+    return torch.linalg.vector_norm(t - mean, dim=feature_dim).float().mean(dim=reduce_dim)
 
 def norm_minmax(t):
     mi, ma = t.min(), t.max()
     return (t - mi) / (ma - mi)
+
+def norm_mean_std(t, mu=0, std=1):
+    return (t.float() - t.float().mean()) * std / t.float().std() + mu
 
 def split_squeeze3d(t):
     n = t.size(0)
