@@ -6,22 +6,28 @@ metric:
   goal: maximize
 parameters:
   data:
-    values: ['data/CT-ORG/volume_010.pt', 'data/CT-ORG/volume_012.pt']
+    value: 'data/CT-ORG/volume_010.pt'
   lr-schedule:
     value: 'onecycle'
   vol-scaling-factor:
-    value: 0.25
+    values: [0.25, 0.5, 1.0]
+  label-scaling-factor:
+    value: 0.125
+  samples-per-iteration:
+    values: [8, 16]
   cnn-layers:
-    value: '8 16 32 32'
+    value: '8 16 32'
   linear-layers:
     values:
       - '32'
       - '32 32'
-      - '32 32 32' 
+      - '32 32 32'
   iterations:
-    value: 20000
+    value: 10000
   label-percentage:
     value: 0.1
+  lambda-std:
+    values: [1.0, 10.0]
   learning-rate:
-    values: [1e-4,1e-3,1e-2]
+    values: [1e-3,1e-2,1e-1]
 project: ntf
