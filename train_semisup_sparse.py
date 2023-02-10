@@ -23,7 +23,7 @@ if __name__ == '__main__':
     parser.add_argument('--vol-scaling-factor', type=float, default=1.0, help='Scaling factor to reduce spatial resolution of volumes')
     parser.add_argument('--samples-per-iteration', type=int, default=4096, help='Number of samples per class used in each iteration')
     parser.add_argument('--supports-per-class', type=int, default=256, help='Number of support samples per class')
-    parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
+    parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
     parser.add_argument('--hidden-size', type=int, default=128, help='Hidden feature dim used in projection and prediction heads')
     parse_basics(parser)
     args = parser.parse_args()
@@ -106,7 +106,7 @@ if __name__ == '__main__':
     else:
         vol = vol[None]
 
-    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 16, 32, 64]
+    args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32, 64]
     NF = args.cnn_layers[-1]
     model = PAWSNet(in_dim=vol.size(0), conv_layers=args.cnn_layers, hidden_sz=args.hidden_size, out_classes=num_classes).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
