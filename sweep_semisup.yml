@@ -1,12 +1,12 @@
 program: train_semisup_sparse.py
 method: grid
-name: SweepMaLife
+name: SweepSemiSup
 metric:
   name: BestIoU/lung
   goal: maximize
 parameters:
   data:
-    values: ['data/CT-ORG/volume_010.pt', 'data/CT-ORG/volume_012.pt']
+    value: 'data/CT-ORG/volume_010.pt'
   lr-schedule:
     value: 'onecycle'
   hidden-size:
@@ -18,7 +18,7 @@ parameters:
   supports-per-class:
     values: [128, 256, 512]
   label-percentage:
-    values: [0.1, 0.2, 0.5]
+    values: [0.1, 0.5]
   learning-rate:
-    values: [1e-6,1e-5,1e-4,1e-3,1e-2]
+    values: [1e-5,1e-4,1e-3,1e-2,1e-1,1]
 project: ntf
