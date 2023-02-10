@@ -1,4 +1,4 @@
-import pprint
+import os, random
 from functools import partial
 import torch
 import torch.nn as nn
@@ -22,31 +22,6 @@ pltkwargs = {
     'tight_layout': True
 }
 
-def conv_layer(n_in, n_out, Norm, Act):
-    return nn.Sequential(
-        nn.Conv3d(n_in, n_out, kernel_size=3, stride=1, padding=1),
-        Norm(n_out // 4, n_out),
-        Act(inplace=True)
-    )
-
-def create_cnn(in_dim, n_features=[8, 32, 16], Act=nn.Mish, Norm=nn.GroupNorm):
-    feats = [in_dim] + n_features[:-1]
-    layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act)
-        for n_in, n_out in zip(feats, feats[1:])]
-    last = nn.Conv3d(n_features[-2], n_features[-1], kernel_size=3, stride=1, padding=1)
-    return nn.Sequential(*layers, last)
-
-def create_cnn_old(in_dim):
-    return nn.Sequential(
-        nn.Conv3d(in_dim, 8, kernel_size=3, stride=1, padding=1),
-        nn.GroupNorm(in_dim, in_dim),
-        nn.Mish(inplace=True),
-        nn.Conv3d(8, 16, kernel_size=3, stride=1, padding=1),
-        nn.GroupNorm(8, 8),
-        nn.Mish(inplace=True),
-        nn.Conv3d(16, 16, kernel_size=3, stride=1, padding=1)
-    )
-
 if __name__ == '__main__':
     parser = ArgumentParser('Contrastive TF Design')
     parser.add_argument('data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
@@ -63,10 +38,24 @@ if __name__ == '__main__':
     parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
-    parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
+    parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
+    parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
+    parser.add_argument('--residual', type=str, choices=['true', 'false'], default='false', help='Use skip connections in network')
     parser.add_argument('--lambda-std', type=float, default=1.0, help='Scales loss on cluster standard deviations.')
     parser.add_argument('--lambda-ce', type=float, default=1.0, help='Scales cross entropy loss')
+    parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
+    parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
     args = parser.parse_args()
+
+    # Determinism
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+
+    if args.debug:
+        os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+        torch.autograd.set_detect_anomaly(True)
+        ic.configureOutput(includeContext=True)
 
     # Setup
     BG_CLASS = args.background_class
@@ -131,31 +120,28 @@ if __name__ == '__main__':
     else:
         vol = vol[None]
 
-    args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 32, 16]
-    model = create_cnn(in_dim=vol.size(0), n_features=args.cnn_layers).to(dev)
+    args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32]
+    args.linear_layers = [int(n.strip()) for n in args.linear_layers.replace('[', '').replace(']', '').split(' ')] if args.linear_layers else [32]
+    NF = args.linear_layers[-1]
+    model = FeatureExtractor(in_dim=vol.size(0), n_features=args.cnn_layers, n_linear=args.linear_layers, residual=args.residual == 'true').to(dev)
+    REC_FIELD = len(args.cnn_layers) * 2 + 1
     cls_head = nn.Linear(args.cnn_layers[-1], num_classes).to(dev)
 
     group = 'Contrastive Dense'
-    tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', *args.wandb_tags]
+    tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', *(args.wandb_tags if args.wandb_tags else [])]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), group=group)
     wandb.watch(model)
-    print(model)
+    ic(model)
     jaccard = JaccardIndex(num_classes=num_classes, average=None)
     best_logit_iou, best_cosine_iou, best_mlp_iou = torch.zeros(num_classes), torch.zeros(num_classes), torch.zeros(num_classes)
-
+    
     sample_idxs = { n: l.size(0) for n, l in class_indices.items() }
-    print('Volume Indices for each class:')
-    pprint.pprint({n: v.shape for n, v in class_indices.items()})
-    print('Number of annotations per class:')
-    pprint.pprint(sample_idxs)
+    ic(sample_idxs)
 
     # Dictionary that maps class to indices that are of a DIFFERENT class, for picking negatives
     different_class_indices = { n: torch.cat([v for m,v in class_indices.items() if m != n], dim=0) for n in class_indices.keys() }
     different_sample_idxs = { n: v.size(0) for n,v in different_class_indices.items() }
-    print('Indices for negative samples for each class:')
-    pprint.pprint({n: v.shape for n, v in different_class_indices.items()})
-    print('Number of negative samples for each class:')
-    pprint.pprint(different_sample_idxs)
+    ic(different_sample_idxs)
 
     close_plot = False
 
@@ -168,7 +154,7 @@ if __name__ == '__main__':
         opt.zero_grad()
         # 1 Feed volume thru networks
         with torch.autocast('cuda', enabled=True, dtype=typ):
-            features = model(make_5d(vol))
+            features = model(F.pad(make_5d(vol), tuple([REC_FIELD//2]*6)))
             q = F.normalize(features, dim=1)
         # 2 Choose samples from classes
         BS, FS = q.size(0), q.size(1)

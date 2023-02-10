@@ -40,68 +40,6 @@ def get_index_upscale_function(vol_scaling_factor, device=None):
 
     return idx_up
 
-class PrintLayer(nn.Module):
-    def __init__(self): super().__init__()
-    def forward(self, x):
-        print(x.shape)
-        return x
-
-def conv_layer(n_in, n_out, Norm, Act, ks=3):
-    return nn.Sequential(
-        nn.Conv3d(n_in, n_out, kernel_size=ks, stride=1, padding=0),
-        Norm(n_out // 4, n_out),
-        Act(inplace=True)
-    )
-
-def create_cnn(in_dim, n_features=[8, 16, 32], n_linear=[32], Act=nn.Mish, Norm=nn.GroupNorm):
-    assert isinstance(n_features, list) and len(n_features) > 0
-    assert isinstance(n_linear,   list) and len(n_linear) > 0
-    feats = [in_dim] + n_features
-    lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
-    print('Conv layer features:', feats)
-    print('Linear layer features:', lins)
-    layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act)
-        for n_in, n_out in zip(feats, feats[1:])]
-    lin_layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1)
-        for n_in, n_out in zip(lins, lins[1:])]
-    last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
-    last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
-    return nn.Sequential(*layers, *lin_layers, last)
-
-class FeatureExtractor(nn.Module):
-    def __init__(self, in_dim, n_features=[8, 16, 32], n_linear=[32],
-        Act=nn.Mish, Norm=nn.GroupNorm, residual=False):
-        super().__init__()
-        assert isinstance(n_features, list) and len(n_features) > 0
-        assert isinstance(n_linear, list) and len(n_linear) > 0
-        self.residual = residual
-        feats = [in_dim] + n_features
-        if residual:
-            lins = [n_features[-1] + in_dim] + n_linear if len(n_linear) > 0 else []
-            last_in = n_linear[-2] + in_dim if len(n_linear) > 1 else n_features[-1] + in_dim
-            self.crop = CenterCrop(ks=len(n_features)*2)
-        else:
-            lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
-            last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
-
-        convs = [conv_layer(n_in, n_out, Norm=Norm, Act=Act)
-            for n_in, n_out in zip(feats, feats[1:])]
-        lins = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1)
-            for n_in, n_out in zip(lins, lins[1:])]
-        self.convs = nn.Sequential(*convs)
-        self.lins = nn.Sequential(*lins)
-        self.last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
-
-    def forward(self, x):
-        if self.residual:
-            skip = self.crop(x)
-            x = self.convs(x)
-            x = self.lins(torch.cat([skip, x], dim=1))
-            return self.last(torch.cat([skip, x], dim=1))
-        else:
-            return self.last(self.lins(self.convs(x)))
-
-
 if __name__ == '__main__':
     parser = ArgumentParser('Contrastive TF Design')
     parser.add_argument('--data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
@@ -119,7 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
-    parser.add_argument('--validation-every', type=int, default=1000, help='Run validation step every n-th iteration')
+    parser.add_argument('--validation-every', type=int, default=500, help='Run validation step every n-th iteration')
     parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
     parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
     parser.add_argument('--residual', type=str, choices=['true', 'false'], default='false', help='Use skip connections in network')
@@ -136,6 +74,7 @@ if __name__ == '__main__':
     if args.debug:
         os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
         torch.autograd.set_detect_anomaly(True)
+        ic.configureOutput(includeContext=True)
 
     # Setup
     BS = args.samples_per_iteration
@@ -163,7 +102,7 @@ if __name__ == '__main__':
     # Get downsampled volume for validation
     lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=args.label_scaling_factor, mode='nearest').squeeze()
     lowres_mask = F.interpolate(make_5d(data['mask']),        scale_factor=args.label_scaling_factor, mode='nearest').squeeze()
-    vol_u8 = (255.0 * (lowres_vol - lowres_vol.min()) / (lowres_vol.max() - lowres_vol.min())).squeeze().cpu().numpy().astype(np.uint8)
+    vol_u8 = (255.0 * norm_minmax(lowres_vol)).squeeze().cpu().numpy().astype(np.uint8)
     lowres_vol = lowres_vol.to(typ).to(dev)
 
     IDX = min(lowres_vol.shape[-3:]) // 2
@@ -217,14 +156,14 @@ if __name__ == '__main__':
     else:
         vol = make_4d(vol)
 
-    log_tensor(vol_u8, 'vol_u8')
-    log_tensor(vol, 'vol')
-    log_tensor(lowres_vol, 'lowres_vol')
+    ic(vol_u8)
+    ic(vol,)
+    ic(lowres_vol)
 
     # Model
     args.cnn_layers    = [int(n.strip()) for n in    args.cnn_layers.replace('[', '').replace(']', '').split(' ')] if args.cnn_layers    else [8, 16, 32]
     args.linear_layers = [int(n.strip()) for n in args.linear_layers.replace('[', '').replace(']', '').split(' ')] if args.linear_layers else [32]
-    NF = args.cnn_layers[-1]
+    NF = args.linear_layers[-1]
     model = FeatureExtractor(
         in_dim=vol.size(0), 
         n_features=args.cnn_layers, 
@@ -240,25 +179,20 @@ if __name__ == '__main__':
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args),
         mode='offline' if args.debug else 'online', group=group)
     wandb.watch(model)
-    print(model)
+    ic(model)
     print(f'Network uses receiptive field of {REC_FIELD}x{REC_FIELD}x{REC_FIELD}.')
     jaccard = JaccardIndex(num_classes=num_classes, average=None)
     best_logit_iou, best_cosine_iou, best_mlp_iou = torch.zeros(num_classes), torch.zeros(num_classes), torch.zeros(num_classes)
 
     sample_idxs = { n: l.size(0) for n, l in class_indices.items() }
-    print('Number of annotations per class:')
-    pprint.pprint(sample_idxs)
+    ic(sample_idxs)
 
     # Dictionary that maps class to indices that are of a DIFFERENT class, for picking negatives
     different_class_indices = { n: torch.cat([v for m,v in class_indices.items() if m != n], dim=0) for n in class_indices.keys() }
     different_sample_idxs = { n: v.size(0) for n,v in different_class_indices.items() }
     if args.debug:
-        print('Volume Indices for each class:')
-        pprint.pprint({n: v.shape for n, v in class_indices.items()})
-        print('Indices for negative samples for each class:')
-        pprint.pprint({n: v.shape for n, v in different_class_indices.items()})
-        print('Number of negative samples for each class:')
-        pprint.pprint(different_sample_idxs)
+        ic('Number of negative samples for each class:')
+        ic(different_sample_idxs)
 
     close_plot = False
 
@@ -290,20 +224,16 @@ if __name__ == '__main__':
             pos_q, neg_q = F.normalize(pos_feat, dim=-1), F.normalize(neg_feat, dim=-1)
         # 2 Choose samples from classes
         if args.debug:
-            print('pos_samples')
-            pprint.pprint({k: v.shape for k,v in pos_samples.items()})
-            print('neg_samples')
-            pprint.pprint({k: v.shape for k,v in neg_samples.items()})
+            ic('pos_samples', {k: v.shape for k,v in pos_samples.items()})
+            ic('neg_samples', {k: v.shape for k,v in neg_samples.items()})
+            ic(pos_crops)
+            ic(neg_crops)
+            ic(pos_feat)
+            ic(neg_feat)
+            ic(pos_q)
+            ic(neg_q)
 
-            log_tensor(pos_crops, 'pos_crops')
-            log_tensor(neg_crops, 'neg_crops')
-            log_tensor(pos_feat, 'pos_feat')
-            log_tensor(neg_feat, 'neg_feat')
-            log_tensor(pos_q, 'pos_q')
-            log_tensor(neg_q, 'neg_q')
-
-        # Compute InfoNCE
-        #                                (C, 1, BS, F)   x     (C, 1+N, BS, F)     -> (C, 1, BS, 1+N)  ->  (C*BS, 1+N)
+        # Compute InfoNCE               (C, 1, BS, F)   x     (C, 1+N, BS, F)     -> (C, 1, BS, 1+N)  ->  (C*BS, 1+N)
         sim = torch.einsum('cpbf,cnbf->cpbn', [pos_q[:,[0]], torch.cat([pos_q[:,[1]], neg_q.expand(-1, -1, BS, -1)], dim=1)]).squeeze(1).reshape(C*BS, NEG_COUNT+1)
         labels = torch.zeros(sim.size(0), dtype=torch.long, device=dev)
         infonce_loss = F.cross_entropy(sim, labels)
@@ -311,9 +241,7 @@ if __name__ == '__main__':
 
         # Minimize cluster center standard deviation
         if args.lambda_std > 0:
-            # cc_l2 = pos_feat.mean(dim=(1,2))
             with torch.autocast('cuda', enabled=False): # The following .mean() needs to be done in FP32
-                # std_loss = torch.linalg.vector_norm(pos_feat - cc_l2[:, None,None, :], dim=-1).float().mean(dim=(1,2)).sum(0)
                 std_loss = feature_std(pos_feat, reduce_dim=(1,2), feature_dim=-1)
             loss += args.lambda_std * std_loss.sum(0)
         else:
@@ -366,45 +294,24 @@ if __name__ == '__main__':
                 cos_iou = jaccard(cos_closest.cpu(), lowres_mask)
                 jaccard.reset()
                 best_cosine_iou = torch.stack([best_cosine_iou, cos_iou], dim=0).max(0).values
-                log_dict.update({
-                    f'IoU_logits/{n}': v for n,v in zip(label_dict.values(), l2_iou)
-                })
-                log_dict.update({
-                    f'IoU_cosine/{n}': v for n, v in zip(label_dict.values(), cos_iou)
-                })
-                log_dict.update({
-                    f'BestIoU_cosine/{n}': v for n,v in zip(label_dict.values(), best_cosine_iou)
-                })
-                log_dict.update({
-                    f'BestIoU_logits/{n}': v for n, v in zip(label_dict.values(), best_logit_iou)
-                })
-                log_dict.update({
-                    f'Plots_Dist_L2/{n}/z': wandb.Image(l2_distance_map[i, IDX].cpu().float().numpy())
-                    for i, n in enumerate(class_indices.keys())
-                })
-                log_dict.update({
-                    f'Plots_Dist_L2/{n}/y': wandb.Image(l2_distance_map[i, :, IDX].cpu().float().numpy())
-                    for i, n in enumerate(class_indices.keys())
-                })
-                log_dict.update({
-                    f'Plots_Dist_L2/{n}/x': wandb.Image(l2_distance_map[i, :, :, IDX].cpu().float().numpy())
-                    for i, n in enumerate(class_indices.keys())
-                })
-                log_dict.update({
-                    f'Plots_Dist_Cos/{n}/z':
-                    wandb.Image(cos_center_distances.cpu()[i, IDX])
-                    for i, n in enumerate(class_indices.keys())
-                })
-                log_dict.update({
-                    f'Plots_Dist_Cos/{n}/y':
-                    wandb.Image(cos_center_distances.cpu()[i, :, IDX])
-                    for i, n in enumerate(class_indices.keys())
-                })
-                log_dict.update({
-                    f'Plots_Dist_Cos/{n}/x':
-                    wandb.Image(cos_center_distances.cpu()[i, :, :, IDX])
-                    for i, n in enumerate(class_indices.keys())
-                })
+                log_dict.update(
+                    { f'IoU_logits/{n}':     v for n,v in zip(label_dict.values(), l2_iou) } |
+                    { f'IoU_cosine/{n}':     v for n,v in zip(label_dict.values(), cos_iou) } | 
+                    { f'BestIoU_cosine/{n}': v for n,v in zip(label_dict.values(), best_cosine_iou) } |
+                    { f'BestIoU_logits/{n}': v for n,v in zip(label_dict.values(), best_logit_iou) } |
+                    { f'Plots_Dist_L2/{n}/z': wandb.Image(l2_distance_map[i, IDX].cpu().float().numpy())
+                        for i, n in enumerate(class_indices.keys())} |
+                    { f'Plots_Dist_L2/{n}/y': wandb.Image(l2_distance_map[i, :, IDX].cpu().float().numpy())
+                        for i, n in enumerate(class_indices.keys()) } |
+                    { f'Plots_Dist_L2/{n}/x': wandb.Image(l2_distance_map[i, :, :, IDX].cpu().float().numpy())
+                        for i, n in enumerate(class_indices.keys()) } |
+                    { f'Plots_Dist_Cos/{n}/z': wandb.Image(cos_center_distances.cpu()[i, IDX])
+                        for i, n in enumerate(class_indices.keys()) } |
+                    { f'Plots_Dist_Cos/{n}/y': wandb.Image(cos_center_distances.cpu()[i, :, IDX])
+                        for i, n in enumerate(class_indices.keys()) } |
+                    { f'Plots_Dist_Cos/{n}/x': wandb.Image(cos_center_distances.cpu()[i, :, :, IDX])
+                        for i, n in enumerate(class_indices.keys()) }
+                )
                 log_dict['Plots_Seg/L2dist/z'] = wandb.Image(vol_u8[IDX], masks={
                     'predictions':  {'mask_data': l2_closest[IDX].cpu().numpy(),   'class_labels': label_dict },
                     'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict }

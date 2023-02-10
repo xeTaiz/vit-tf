@@ -1,9 +1,85 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+
+from collections import OrderedDict
+from itertools import count
+
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+
+from icecream import ic, argumentToString
+@argumentToString.register(np.ndarray)
+def _(t): return f'{tuple(t.shape)} of type {t.dtype} (NumPy) in value range [{t.min().item():.3f}, {t.max().item():.3f}]'
+@argumentToString.register(torch.Tensor)
+def _(t): return f'{tuple(t.shape)} of type {t.dtype} ({t.device.type}) in value range [{t.min().item():.3f}, {t.max().item():.3f}]'
+ic.configureOutput(prefix='')
+
+class PrintLayer(nn.Module):
+    def __init__(self): super().__init__()
+    def forward(self, x):
+        ic(x.shape)
+        return x
+
+def conv_layer(n_in, n_out, Norm, Act, ks=3, suffix=''):
+    return nn.Sequential(OrderedDict([
+        (f'conv{suffix}', nn.Conv3d(n_in, n_out, kernel_size=ks, stride=1, padding=0)),
+        (f'norm{suffix}', Norm(n_out // 4, n_out)),
+        (f'act{suffix}', Act(inplace=True))
+    ]))
+
+def create_cnn(in_dim, n_features=[8, 16, 32], n_linear=[32], Act=nn.Mish, Norm=nn.GroupNorm):
+    assert isinstance(n_features, list) and len(n_features) > 0
+    assert isinstance(n_linear,   list) and len(n_linear) > 0
+    feats = [in_dim] + n_features
+    lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
+    layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, suffix=i)
+        for i, n_in, n_out in zip(count(1), feats, feats[1:])]
+    lin_layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1, suffix=i)
+        for i, n_in, n_out in zip(count(1), lins, lins[1:])]
+    last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
+    last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
+    return nn.Sequential(OrderedDict([
+        ('convs', nn.Sequential(*layers)), 
+        ('linears', nn.Sequential(*lin_layers)), 
+        ('last', last)
+        ]))
+
+class FeatureExtractor(nn.Module):
+    def __init__(self, in_dim, n_features=[8, 16, 32], n_linear=[32],
+        Act=nn.Mish, Norm=nn.GroupNorm, residual=False):
+        super().__init__()
+        assert isinstance(n_features, list) and len(n_features) > 0
+        assert isinstance(n_linear, list) and len(n_linear) > 0
+        self.residual = residual
+        feats = [in_dim] + n_features
+        if residual:
+            lins = [n_features[-1] + in_dim] + n_linear if len(n_linear) > 0 else []
+            last_in = n_linear[-2] + in_dim if len(n_linear) > 1 else n_features[-1] + in_dim
+            self.crop = CenterCrop(ks=len(n_features)*2)
+        else:
+            lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
+            last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
+
+        convs = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, suffix=i)
+            for i, n_in, n_out in zip(count(1), feats, feats[1:])]
+        lins = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1, suffix=i)
+            for i, n_in, n_out in zip(count(1), lins, lins[1:])]
+        self.convs = nn.Sequential(*convs)
+        self.lins = nn.Sequential(*lins)
+        self.last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        if self.residual:
+            skip = self.crop(x)
+            x = self.convs(x)
+            x = self.lins(torch.cat([skip, x], dim=1))
+            return self.last(torch.cat([skip, x], dim=1))
+        else:
+            return self.last(self.lins(self.convs(x)))
+
 
 def split_squeeze(t, bs, f):
     n = t.size(0)
@@ -11,12 +87,6 @@ def split_squeeze(t, bs, f):
     BS = torch.arange(bs)[:, None, None].expand(bs, f, n)
     F =  torch.arange(f)[None, :, None].expand(bs, f, n)
     return (BS, F, X.squeeze(-1), Y.squeeze(-1), Z.squeeze(-1))
-
-def log_tensor(t, name):
-    if torch.is_tensor(t):
-        print(f'{name}: {tuple(t.shape)} of type {t.dtype} ({t.device.type}) in value range [{t.min().item():.3f}, {t.max().item():.3f}]')
-    else:
-        print(f'{name}: {tuple(t.shape)} of type {t.dtype} (numpy) in value range [{t.min().item():.3f}, {t.max().item():.3f}]')
 
 def feature_std(t, reduce_dim=None, feature_dim=-1):
     ''' Computes standard deviation of feature distances to their mean

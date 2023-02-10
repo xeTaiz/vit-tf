@@ -1,4 +1,3 @@
-import pprint
 from functools import partial
 import torch
 import torch.nn as nn
@@ -29,42 +28,10 @@ pltkwargs = {
     'tight_layout': True
 }
 
-class CenterCrop(nn.Module):
-    def __init__(self, ks=3):
-        super().__init__()
-        self.pad = ks // 2
-
-    def forward(self, x):
-        i = self.pad
-        out = x[..., i:-i, i:-i, i:-i]
-        return out
-
-class PrintLayer(nn.Module):
-    def __init__(self, name=''):
-        super().__init__()
-        self.name = name
-    def forward(self, x):
-        log_tensor(x, self.name)
-        return x
-
-def conv_layer(n_in, n_out, Norm, Act, suffix=''):
-    return nn.Sequential(OrderedDict([
-        (f'conv{suffix}', nn.Conv3d(n_in, n_out, kernel_size=3, stride=1, padding=0)),
-        (f'norm{suffix}', Norm(n_out // 4, n_out)),
-        (f'act{suffix}', Act(inplace=True)),
-    ]))
-
-def create_cnn(in_dim, n_features=[8, 32, 16], Act=nn.Mish, Norm=nn.GroupNorm):
-    feats = [in_dim] + n_features[:-1]
-    layers = [(f'conv_block{i}', conv_layer(n_in, n_out, Norm=Norm, Act=Act, suffix=i))
-            for i, n_in, n_out in zip(count(1), feats, feats[1:])]
-    last = nn.Conv3d(n_features[-2], n_features[-1], kernel_size=3, stride=1, padding=0)
-    return nn.Sequential(OrderedDict([*layers, ('last_conv', last)]))
-
 class NTF(nn.Module):
     def __init__(self, in_dim, conv_layers, hidden_sz, out_classes, head_bottleneck=4):
         super().__init__()
-        self.encoder = create_cnn(in_dim=in_dim, n_features=conv_layers)
+        self.encoder = create_cnn(in_dim=in_dim, n_features=conv_layers, n_linear=[conv_layers[-1]])
         NF = conv_layers[-1]
         NH = hidden_sz
         self.head = nn.Sequential(OrderedDict([
@@ -123,9 +90,10 @@ if __name__ == '__main__':
     parser.add_argument('--iterations', type=int, default=10001, help='Number of optimization steps')
     parser.add_argument('--samples-per-iteration', type=int, default=4096, help='Number of samples per class used in each iteration')
     parser.add_argument('--supports-per-class', type=int, default=256, help='Number of support samples per class')
-    parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
+    parser.add_argument('--label-percentage', type=float, default=0.1, help='Percentage of labels to use for optimization')
     parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
     parser.add_argument('--no-validation', action='store_true', help='Skip validation')
+    parser.add_argument('--validation-every', type=int, default=500, help='Run validation step every n-th iteration')
     parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
     parser.add_argument('--hidden-size', type=int, default=128, help='Hidden feature dim used in projection and prediction heads')
     parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
@@ -140,6 +108,8 @@ if __name__ == '__main__':
     if args.debug:
         os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
         torch.autograd.set_detect_anomaly(True)
+        ic.configureOutput(includeContext=True)
+
 
     # Setup
     BS = args.samples_per_iteration
@@ -166,9 +136,9 @@ if __name__ == '__main__':
     else:
         vol  = data['vol']
         mask = data['mask']
-    log_tensor(vol, 'Loaded volume data')
+    ic(vol)
     num_classes = len(data['labels'])
-    label_dict = {i: n for i,n in enumerate(data['labels'])}
+    label_dict = {i: n for i,n in enumerate(data['labels'] + ['unlabeled'])}
     label2idx =  {n: i for i,n in label_dict.items()}
 
     if args.label_percentage < 1.0:
@@ -185,7 +155,7 @@ if __name__ == '__main__':
     lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=0.25, mode='nearest')
     lowres_mask = F.interpolate(make_5d(data['mask']),        scale_factor=0.25, mode='nearest').squeeze()
     vol_u8 = (255.0 * (lowres_vol - lowres_vol.min()) / (lowres_vol.max() - lowres_vol.min())).squeeze().cpu().numpy().astype(np.uint8)
-    log_tensor(vol_u8, 'vol_u8')
+    ic(vol_u8)
     lowres_vol = lowres_vol.to(typ).to(dev)
     IDX = min(lowres_vol.shape[-3:]) // 2
 
@@ -205,7 +175,7 @@ if __name__ == '__main__':
         vol = ((vol.float() - vol.float().mean()) / vol.float().std()).to(typ).to(dev)
     else:
         vol = vol.to(typ).to(dev)
-    log_tensor(vol, 'Normalized volume')
+    ic(vol)
 
     if POS_ENCODING:
         x = torch.linspace(-1, 1, vol.size(-1), device=dev, dtype=typ)
@@ -233,11 +203,8 @@ if __name__ == '__main__':
 
     sample_idxs = { n: l.size(0) for n, l in class_indices.items() }
     if args.debug:
-        print(model)
-        print('Volume Indices for each class:')
-        pprint.pprint({n: v.shape for n, v in class_indices.items()})
-        print('Number of annotations per class:')
-        pprint.pprint(sample_idxs)
+        ic(model)
+        ic(sample_idxs)
 
     close_plot = False
 
@@ -284,14 +251,14 @@ if __name__ == '__main__':
                 loss = ploss + me_max + clas_loss
         # 2 Choose samples from classes
         if args.debug:
-            log_tensor(sup_crops, 'sup_crops')
-            log_tensor(anp_crops, 'anp_crops')
-            log_tensor(sup_anc_feat, 'sup_anc_feat')
-            log_tensor(sup_pos_feat, 'sup_pos_feat')
-            log_tensor(anc_feat, 'anc_feat')
-            log_tensor(pos_feat, 'pos_feat')
+            ic(sup_crops)
+            ic(anp_crops)
+            ic(sup_anc_feat)
+            ic(sup_pos_feat)
+            ic(anc_feat)
+            ic(pos_feat)
             print('sup_samples:')
-            pprint.pprint({k: v.shape for k,v in sup_samples.items()})
+            ic({k: v.shape for k,v in sup_samples.items()})
 
         scaler.scale(loss).backward()
         scaler.step(opt)
@@ -307,7 +274,7 @@ if __name__ == '__main__':
                 'Charts/learning_rate': sched.get_last_lr()[0]
             }
 
-            if (i == args.iterations-1) or (i % 1000 == 0 and not args.no_validation):
+            if (i == args.iterations-1) or (i % args.validation_every == 0 and not args.no_validation):
                 with torch.autocast('cuda', enabled=True, dtype=typ):
                     full_feats = model.forward_fullvol(F.pad(lowres_vol, tuple([REC_FIELD//2]*6))).squeeze(0)
                     pred = full_feats.argmax(dim=0)
@@ -317,12 +284,10 @@ if __name__ == '__main__':
                 jaccard.reset()
 
                 best_iou = torch.stack([best_iou, iou], dim=0).max(0).values
-                log_dict.update({
-                    f'IoU/{n}': v for n,v in zip(label_dict.values(), iou)
-                })
-                log_dict.update({
-                    f'BestIoU/{n}': v for n,v in zip(label_dict.values(), best_iou)
-                })
+                log_dict.update(
+                    { f'IoU/{n}':     v for n,v in zip(label_dict.values(), iou) } |
+                    { f'BestIoU/{n}': v for n,v in zip(label_dict.values(), best_iou) }
+                )
 
                 log_dict['Plots_Seg/z'] = wandb.Image(vol_u8[IDX], masks={
                     'predictions':  {'mask_data': pred[IDX].cpu().numpy(),  'class_labels': label_dict },
