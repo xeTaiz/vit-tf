@@ -12,13 +12,17 @@ parameters:
   hidden-size:
     value: 64
   iterations:
-    value: 50000
+    value: 20000
+  cnn-layers:
+    values:
+      - '8 16 32 64'
+      - '16 32 64 64'
   samples-per-iteration:
     values: [4096, 8192, 16384]
   supports-per-class:
     values: [128, 256, 512]
   label-percentage:
-    values: [0.1, 0.5]
+    value: 0.1
   learning-rate:
-    values: [1e-5,1e-4,1e-3,1e-2,1e-1,1]
+    values: [1e-4,1e-3,1e-2,1e-1,1]
 project: ntf
