@@ -1,88 +1,40 @@
-import pprint
 from functools import partial
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from torchmetrics import JaccardIndex
-import os, random
 from tqdm import trange
 
 from torchvtk.utils import make_4d, make_5d
-
-from rle_shit import decode_from_annotation
 
 import wandb
 from argparse import ArgumentParser
 
 from utils import *
 from semisparseconv import gather_receiptive_fields2 as gather_receiptive_fields
-
-pltkwargs = {
-    'dpi':  200,
-    'tight_layout': True
-}
-
-def get_index_upscale_function(vol_scaling_factor, device=None):
-    up = int(1./vol_scaling_factor)
-    assert up >= 1
-    if up == 1.0: return (lambda x: x)
-    x,y,z = torch.meshgrid(torch.arange(up), torch.arange(up), torch.arange(up), indexing='ij')
-    mg = torch.stack([x,y,z], dim=-1).reshape(-1, 3)
-    if device is not None:
-        mg = mg.to(device)
-        def idx_up(idx):
-            return up*idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))]
-    else:
-        def idx_up(idx):
-            return up*idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))].to(idx.device)
-
-    return idx_up
+from models import FeatureExtractor
 
 if __name__ == '__main__':
-    parser = ArgumentParser('Contrastive TF Design')
-    parser.add_argument('--data', type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
+    parser = ArgumentParser('Contrastive TF Design (Sparse)')
     parser.add_argument('--background-class', type=str, default='background', help='Name of the background class')
     parser.add_argument('--vol-scaling-factor', type=float, default=0.25, help='Scaling factor to reduce spatial resolution of volumes')
     parser.add_argument('--label-scaling-factor', type=float, default=0.25, help='Scaling factor at which labels are given compared to full volume')
-    parser.add_argument('--no-pos-encoding', action='store_true', help='Use positional encoding with input (3D coordinate)')
-    parser.add_argument('--raw-data', action='store_true', help='Use raw data and do not normalize input to 0-mean 1-std')
-    parser.add_argument('--fp32', action='store_true', help='Use full 32-bit precision')
-    parser.add_argument('--learning-rate', type=float, default=1e-2, help='Learning rate for optimization')
-    parser.add_argument('--weight-decay', type=float, default=1e-3, help='Weight decay for optimizer')
-    parser.add_argument('--lr-schedule', type=str, default='onecycle', help='Learning rate schedule')
-    parser.add_argument('--iterations', type=int, default=10000, help='Number of optimization steps')
     parser.add_argument('--samples-per-iteration', type=int, default=8, help='Number of samples per class used in each iteration')
-    parser.add_argument('--label-percentage', type=float, default=1.0, help='Percentage of labels to use for optimization')
-    parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
-    parser.add_argument('--no-validation', action='store_true', help='Skip validation')
-    parser.add_argument('--validation-every', type=int, default=500, help='Run validation step every n-th iteration')
     parser.add_argument('--cnn-layers', type=str, help='Number of features per CNN layer')
     parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
     parser.add_argument('--residual', type=str, choices=['true', 'false'], default='false', help='Use skip connections in network')
     parser.add_argument('--lambda-std', type=float, default=0.0, help='Weighting of standard deviation loss')
-    parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
-    parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
+    parse_basics(parser)
     args = parser.parse_args()
-
-    # Determinism
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-
-    if args.debug:
-        os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-        torch.autograd.set_detect_anomaly(True)
-        ic.configureOutput(includeContext=True)
+    setup_seed_and_debug(args)
 
     # Setup
     BS = args.samples_per_iteration
     BG_CLASS = args.background_class
     NEG_COUNT = int(2**16)
-    FP16 = not args.fp32
-    NORMALIZE = not args.raw_data
-    POS_ENCODING = not args.no_pos_encoding
+    NORMALIZE = args.normalize == 'true'
+    POS_ENCODING = args.pos_encoding == 'true'
     if args.lr_schedule.lower() == 'onecycle':
         LR_SCHED = partial(torch.optim.lr_scheduler.OneCycleLR, max_lr=args.learning_rate, total_steps=args.iterations)
     elif args.lr_schedule.lower() == 'cosine':
@@ -91,7 +43,7 @@ if __name__ == '__main__':
         LR_SCHED = partial(torch.optim.lr_scheduler.ConstantLR, factor=1.0)
 
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    typ = torch.float16 if FP16 else torch.float32
+    typ = torch.float16 if args.fp16 == 'true' else torch.float32
     ONE = torch.ones(1, device=dev)
 
     # Data
@@ -175,7 +127,7 @@ if __name__ == '__main__':
 
     # Logging
     group = 'Contrastive Sparse'
-    tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
+    tags = [f'{args.label_percentage} Labels', 'NormalizedData' if args.normalize else 'RawData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args),
         mode='offline' if args.debug else 'online', group=group)
     wandb.watch(model)

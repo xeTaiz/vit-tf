@@ -2,9 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
-from collections import OrderedDict
-from itertools import count
+import random, os
 
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
@@ -17,69 +15,46 @@ def _(t): return f'{tuple(t.shape)} of type {t.dtype} (NumPy) in value range [{t
 def _(t): return f'{tuple(t.shape)} of type {t.dtype} ({t.device.type}) in value range [{t.min().item():.3f}, {t.max().item():.3f}]'
 ic.configureOutput(prefix='')
 
-class PrintLayer(nn.Module):
-    def __init__(self): super().__init__()
-    def forward(self, x):
-        ic(x.shape)
-        return x
+def setup_seed_and_debug(args):
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
 
-def conv_layer(n_in, n_out, Norm, Act, ks=3, suffix=''):
-    return nn.Sequential(OrderedDict([
-        (f'conv{suffix}', nn.Conv3d(n_in, n_out, kernel_size=ks, stride=1, padding=0)),
-        (f'norm{suffix}', Norm(n_out // 4, n_out)),
-        (f'act{suffix}', Act(inplace=True))
-    ]))
+    if args.debug:
+        os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+        torch.autograd.set_detect_anomaly(True)
+        ic.configureOutput(includeContext=True)
 
-def create_cnn(in_dim, n_features=[8, 16, 32], n_linear=[32], Act=nn.Mish, Norm=nn.GroupNorm):
-    assert isinstance(n_features, list) and len(n_features) > 0
-    assert isinstance(n_linear,   list) and len(n_linear) > 0
-    feats = [in_dim] + n_features
-    lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
-    layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, suffix=i)
-        for i, n_in, n_out in zip(count(1), feats, feats[1:])]
-    lin_layers = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1, suffix=i)
-        for i, n_in, n_out in zip(count(1), lins, lins[1:])]
-    last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
-    last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
-    return nn.Sequential(OrderedDict([
-        ('convs', nn.Sequential(*layers)), 
-        ('linears', nn.Sequential(*lin_layers)), 
-        ('last', last)
-        ]))
+def parse_basics(parser):
+    parser.add_argument('--data', type=str, required=True, help='Path to Data with {vol, mask, labels} keys in .pt file')
+    parser.add_argument('--label-percentage', type=float, default=0.1, help='Percentage of labels to use for optimization')
+    parser.add_argument('--iterations', type=int, default=10000, help='Number of optimization steps')
+    parser.add_argument('--learning-rate', type=float, default=1e-2, help='Learning rate for optimization')
+    parser.add_argument('--weight-decay', type=float, default=1e-3, help='Weight decay for optimizer')
+    parser.add_argument('--lr-schedule', type=str, default='onecycle', help='Learning rate schedule')
+    parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
+    parser.add_argument('--pos-encoding', type=str, choices=['true', 'false'], default='true', help='Use positional encoding with input (3D coordinate)')
+    parser.add_argument('--normalize',    type=str, choices=['true', 'false'], default='true', help='Normalize input to 0-mean and 1-std')
+    parser.add_argument('--fp16',         type=str, choices=['true', 'false'], default='true', help='Use 16bit mixed-precision')
+    parser.add_argument('--validation-every', type=int, default=500, help='Run validation step every n-th iteration')
+    parser.add_argument('--no-validation', action='store_true', help='Skip validation')
+    parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
+    parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
 
-class FeatureExtractor(nn.Module):
-    def __init__(self, in_dim, n_features=[8, 16, 32], n_linear=[32],
-        Act=nn.Mish, Norm=nn.GroupNorm, residual=False):
-        super().__init__()
-        assert isinstance(n_features, list) and len(n_features) > 0
-        assert isinstance(n_linear, list) and len(n_linear) > 0
-        self.residual = residual
-        feats = [in_dim] + n_features
-        if residual:
-            lins = [n_features[-1] + in_dim] + n_linear if len(n_linear) > 0 else []
-            last_in = n_linear[-2] + in_dim if len(n_linear) > 1 else n_features[-1] + in_dim
-            self.crop = CenterCrop(ks=len(n_features)*2)
-        else:
-            lins = [n_features[-1]] + n_linear if len(n_linear) > 0 else []
-            last_in = n_linear[-2] if len(n_linear) > 1 else n_features[-1]
-
-        convs = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, suffix=i)
-            for i, n_in, n_out in zip(count(1), feats, feats[1:])]
-        lins = [conv_layer(n_in, n_out, Norm=Norm, Act=Act, ks=1, suffix=i)
-            for i, n_in, n_out in zip(count(1), lins, lins[1:])]
-        self.convs = nn.Sequential(*convs)
-        self.lins = nn.Sequential(*lins)
-        self.last = nn.Conv3d(last_in, n_linear[-1], kernel_size=1, stride=1, padding=0)
-
-    def forward(self, x):
-        if self.residual:
-            skip = self.crop(x)
-            x = self.convs(x)
-            x = self.lins(torch.cat([skip, x], dim=1))
-            return self.last(torch.cat([skip, x], dim=1))
-        else:
-            return self.last(self.lins(self.convs(x)))
-
+def get_index_upscale_function(vol_scaling_factor, device=None):
+    up = int(1./vol_scaling_factor)
+    assert up >= 1
+    if up == 1.0: return (lambda x: x)
+    x,y,z = torch.meshgrid(torch.arange(up), torch.arange(up), torch.arange(up), indexing='ij')
+    mg = torch.stack([x,y,z], dim=-1).reshape(-1, 3)
+    if device is not None:
+        mg = mg.to(device)
+        def idx_up(idx):
+            return up*idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))]
+    else:
+        def idx_up(idx):
+            return up*idx + mg[torch.randint(0, mg.size(0), (idx.size(0),))].to(idx.device)
+    return idx_up
 
 def split_squeeze(t, bs, f):
     n = t.size(0)
@@ -205,37 +180,3 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-
-# Transforms
-def transform_paws_crops(crops, noise_std=0.05, flip=True, permute=True):
-    if noise_std > 0.0:
-        anchors = crops + torch.randn_like(crops) * noise_std
-        positiv = crops + torch.randn_like(crops) * noise_std
-    else:
-        anchors, positiv = crops, crops.clone()
-    if permute:
-        permutations = [  # All Possible permutations for volume
-            (0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)
-        ]
-        idx_anc, idx_pos = torch.randint(0, len(permutations), (2,)).tolist()
-        pre_shap = tuple(range(crops.ndim - 3))
-        post_shap_anc = tuple(map(lambda d: d + len(pre_shap), permutations[idx_anc]))
-        post_shap_pos = tuple(map(lambda d: d + len(pre_shap), permutations[idx_pos]))
-        anchors = anchors.permute(*pre_shap, *post_shap_anc)
-        positiv = anchors.permute(*pre_shap, *post_shap_pos)
-    if flip:
-        flips = torch.rand(6) < 0.5
-        anchors = anchors.flip(dims=[i for i,f in enumerate(flips.tolist()[:3]) if f])
-        positiv = positiv.flip(dims=[i for i,f in enumerate(flips.tolist()[3:]) if f])
-
-    return torch.cat([anchors, positiv], dim=0)
-
-class CenterCrop(nn.Module):
-    def __init__(self, ks=3):
-        super().__init__()
-        self.pad = ks // 2
-
-    def forward(self, x):
-        i = self.pad
-        out = x[..., i:-i, i:-i, i:-i]
-        return out

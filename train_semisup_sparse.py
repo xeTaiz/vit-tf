@@ -1,123 +1,41 @@
 from functools import partial
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from torchmetrics import JaccardIndex, ConfusionMatrix
-import os
 from tqdm import trange
-from collections import OrderedDict
-from itertools import count
-import random
 
 from torchvtk.utils import make_4d, make_5d
-
-from rle_shit import decode_from_annotation
 
 import wandb
 from argparse import ArgumentParser
 
-from utils import *
 from lars import LARS
+from utils import *
+from models import PAWSNet
 from semisparseconv import gather_receiptive_fields2 as gather_receiptive_fields
-from paws import paws_loss
-
-pltkwargs = {
-    'dpi':  200,
-    'tight_layout': True
-}
-
-class NTF(nn.Module):
-    def __init__(self, in_dim, conv_layers, hidden_sz, out_classes, head_bottleneck=4):
-        super().__init__()
-        self.encoder = create_cnn(in_dim=in_dim, n_features=conv_layers, n_linear=[conv_layers[-1]])
-        NF = conv_layers[-1]
-        NH = hidden_sz
-        self.head = nn.Sequential(OrderedDict([
-            ('bn0',   nn.BatchNorm1d(NF)),
-            ('fc1',   nn.Linear(NF, NH//head_bottleneck)),
-            ('bn1',   nn.BatchNorm1d(NH//head_bottleneck)),
-            ('mish1', nn.Mish(True)),
-            ('fc2',   nn.Linear(NH//head_bottleneck, NF))
-        ]))
-        self.proj = nn.Sequential(OrderedDict([
-            ('bn0',   nn.BatchNorm1d(NF)),
-            ('fc1',   nn.Linear(NF, NH)),
-            ('bn1',   nn.BatchNorm1d(NH)),
-            ('mish1', nn.Mish(True)),
-            ('fc2',   nn.Linear(NH, NH)),
-            ('bn2',   nn.BatchNorm1d(NH)),
-            ('mish2', nn.Mish(True)),
-            ('fc3',   nn.Linear(NH, NF))
-        ]))
-        self.predict = nn.Sequential(OrderedDict([
-            ('bn0',   nn.BatchNorm1d(NF)),
-            ('fc1',   nn.Linear(NF, NH)),
-            ('bn1',   nn.BatchNorm1d(NH)),
-            ('mish1', nn.Mish(True)),
-            ('fc2',   nn.Linear(NH, out_classes))
-        ]))
-
-    def forward(self, x, return_class_pred=False):
-        z = self.encoder(x).squeeze() # BS, F, D,H,W -> BS, F
-        feat = self.proj(z)
-        pred = self.head(feat)
-        if return_class_pred:
-            clas = self.predict(z.detach())
-            return feat, pred, clas
-        else:
-            return feat, pred
-
-    def forward_fullvol(self, x):
-        z = self.encoder(x).permute(0, 2,3,4, 1)
-        shap = z.shape # BS, D,H,W, F
-        clas = self.predict(z.reshape(-1, z.size(-1)))
-        return clas.view(*shap[:4], -1).permute(0, 4, 1,2,3).contiguous()
-
+from paws import paws_loss, transform_paws_crops
 
 if __name__ == '__main__':
     parser = ArgumentParser('Contrastive TF Design')
-    parser.add_argument('--data', required=True, type=str, help='Path to Data with {vol, mask, labels} keys in .pt file')
     parser.add_argument('--unlabeled-class', type=str, default='unlabeled', help='Name of the background class')
     parser.add_argument('--vol-scaling-factor', type=float, default=1.0, help='Scaling factor to reduce spatial resolution of volumes')
-    parser.add_argument('--no-pos-encoding', action='store_true', help='Use positional encoding with input (3D coordinate)')
-    parser.add_argument('--raw-data', action='store_true', help='Use raw data and do not normalize input to 0-mean 1-std')
-    parser.add_argument('--fp32', action='store_true', help='Use full 32-bit precision')
-    parser.add_argument('--learning-rate', type=float, default=5e-1, help='Learning rate for optimization')
-    parser.add_argument('--weight-decay', type=float, default=1e-6, help='Weight decay for optimizer')
-    parser.add_argument('--lr-schedule', type=str, default='onecycle', help='Learning rate schedule')
-    parser.add_argument('--iterations', type=int, default=10001, help='Number of optimization steps')
     parser.add_argument('--samples-per-iteration', type=int, default=4096, help='Number of samples per class used in each iteration')
     parser.add_argument('--supports-per-class', type=int, default=256, help='Number of support samples per class')
-    parser.add_argument('--label-percentage', type=float, default=0.1, help='Percentage of labels to use for optimization')
-    parser.add_argument('--wandb-tags', type=str, nargs='*', help='Additional tags to use for W&B')
-    parser.add_argument('--no-validation', action='store_true', help='Skip validation')
-    parser.add_argument('--validation-every', type=int, default=500, help='Run validation step every n-th iteration')
     parser.add_argument('--cnn-layers', type=int, nargs='*', help='Number of features per CNN layer')
     parser.add_argument('--hidden-size', type=int, default=128, help='Hidden feature dim used in projection and prediction heads')
-    parser.add_argument('--debug', action='store_true', help='Turn of WandB, some more logs')
-    parser.add_argument('--seed', type=int, default=3407, help='Random seed for experiment')
+    parse_basics(parser)
     args = parser.parse_args()
-
-    # Determinism
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-
-    if args.debug:
-        os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-        torch.autograd.set_detect_anomaly(True)
-        ic.configureOutput(includeContext=True)
-
+    setup_seed_and_debug(args)
 
     # Setup
     BS = args.samples_per_iteration
     M = args.supports_per_class
     NO_CLASS = args.unlabeled_class
     DOWNSAMPLE = args.vol_scaling_factor != 1.0
-    NORMALIZE = not args.raw_data
-    POS_ENCODING = not args.no_pos_encoding
+    NORMALIZE = args.normalize == 'true'
+    POS_ENCODING = args.pos_encoding == 'true'
     if args.lr_schedule.lower() == 'onecycle':
         LR_SCHED = partial(torch.optim.lr_scheduler.OneCycleLR, max_lr=args.learning_rate, total_steps=args.iterations, cycle_momentum=False)
     elif args.lr_schedule.lower() == 'cosine':
@@ -126,7 +44,7 @@ if __name__ == '__main__':
         LR_SCHED = partial(torch.optim.lr_scheduler.ConstantLR, factor=1.0)
 
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    typ = torch.float32 if args.fp32 else torch.float16
+    typ = torch.float16 if args.fp16 == 'true' else torch.float32
 
     # Data
     data = torch.load(args.data)
@@ -190,11 +108,11 @@ if __name__ == '__main__':
 
     args.cnn_layers = args.cnn_layers if args.cnn_layers else [8, 16, 32, 64]
     NF = args.cnn_layers[-1]
-    model = NTF(in_dim=vol.size(0), conv_layers=args.cnn_layers, hidden_sz=args.hidden_size, out_classes=num_classes).to(dev)
+    model = PAWSNet(in_dim=vol.size(0), conv_layers=args.cnn_layers, hidden_sz=args.hidden_size, out_classes=num_classes).to(dev)
     REC_FIELD = len(args.cnn_layers) * 2 + 1
 
     group = 'SemiSupervised Sparse'
-    tags = [f'{args.label_percentage} Labels', 'RawData' if args.raw_data else 'NormalizedData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
+    tags = [f'{args.label_percentage} Labels', 'NormalizedData' if args.normalize else 'RawData', 'SemiSparse', *(args.wandb_tags if args.wandb_tags else [])]
     wandb.init(project='ntf', entity='viscom-ulm', tags=tags, config=vars(args), 
         mode='offline' if args.debug else 'online', group=group)
     wandb.watch(model)
@@ -233,6 +151,7 @@ if __name__ == '__main__':
             # Anchor n' Positives
             anp_samples = torch.from_numpy(np.random.choice(sample_idxs[NO_CLASS], BS))
             sup_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n: class_indices[n][v] for n,v in sup_samples.items()}.values()), dim=0).to(dev), ks=REC_FIELD) # (M*C*2, 1, Z,Y,X)
+            # TODO: use paws transform !!!!
             anp_crops = gather_receiptive_fields(make_4d(vol), class_indices[NO_CLASS][anp_samples].to(dev), ks=REC_FIELD) # (2*BS, 1, Z,Y,X)
             crops = torch.cat([sup_crops, anp_crops], dim=0) # (C*2 + C*N, IN, Z,Y,X)
         opt.zero_grad()
