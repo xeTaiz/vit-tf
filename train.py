@@ -53,7 +53,7 @@ if __name__ == '__main__':
         vol  = data['vol']
         mask = data['mask']
     IDX = min(vol.shape[-3:])//2
-    vol_u8 = ((vol - vol.min()) * 255.0 / (vol.max() - vol.min())).cpu().numpy().astype(np.uint8)
+    vol_u8 = (255.0 * norm_minmax(vol)).cpu().numpy().astype(np.uint8)
     num_classes = len(data['labels'])
     label_dict = {i: n for i,n in enumerate(data['labels'])}
     label2idx =  {n: i for i,n in label_dict.items()}
@@ -75,7 +75,7 @@ if __name__ == '__main__':
     }
 
     if NORMALIZE:
-        vol = ((vol - vol.mean()) / vol.std()).to(typ).to(dev)
+        vol = norm_mean_std(vol).to(typ).to(dev)
     else:
         vol = vol.to(typ).to(dev)
 

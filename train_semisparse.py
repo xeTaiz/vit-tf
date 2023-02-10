@@ -213,13 +213,9 @@ if __name__ == '__main__':
             }
 
             # Cluster standard deviations
-            log_dict.update({
-                f'StdDev_Cos/{n}': feature_std(pos_q[i], reduce_dim=(0,1), feature_dim=-1).cpu()
-                for i,n in enumerate(pos_samples.keys()) }
-            )
-            log_dict.update({
-                f'StdDev_Logits/{n}': std_loss[i].cpu()
-                for i,n in enumerate(pos_samples.keys()) }
+            log_dict.update(
+                { f'StdDev_Cos/{n}':    feature_std(pos_q[i],    reduce_dim=(0,1), feature_dim=-1).cpu() for i,n in enumerate(pos_samples.keys()) } |
+                { f'StdDev_Logits/{n}': feature_std(pos_feat[i], reduce_dim=(0,1), feature_dim=-1).cpu() for i,n in enumerate(pos_samples.keys()) }
             )
 
             if (i == args.iterations-1) or (i % args.validation_every == 0 and not args.no_validation):
@@ -299,48 +295,6 @@ if __name__ == '__main__':
                     'Plots_CC_similarity/cosine': cos_sim_fig,
                     'Plots_CC_similarity/logits': l2_sim_fig
                 })
-
-                # K-Means clustering
-                # pred_logits = cluster_kmeans(full_feats, num_classes)
-                # pred_cosine = cluster_kmeans(full_qs,    num_classes)
-                # log_dict.update({
-                #     'Plots_Seg_Kmeans/logits/z': wandb.Image(vol_u8[IDX], masks={
-                #         'predictions':  {'mask_data': pred_logits[IDX] },
-                #         'ground_truth': {'mask_data': lowres_mask[IDX].numpy(), 'class_labels': label_dict}
-                #     }),
-                #     'Plots_Seg_Kmeans/logits/y': wandb.Image(vol_u8[:, IDX], masks={
-                #         'predictions':  {'mask_data': pred_logits[:, IDX] },
-                #         'ground_truth': {'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict}
-                #     }),
-                #     'Plots_Seg_Kmeans/logits/x': wandb.Image(vol_u8[:, :, IDX], masks={
-                #         'predictions':  {'mask_data': pred_logits[:, :, IDX] },
-                #         'ground_truth': {'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict}
-                #     }),
-                #     'Plots_Seg_Kmeans/cosine/z': wandb.Image(vol_u8[IDX], masks={
-                #         'predictions':  { 'mask_data': pred_cosine[IDX] },
-                #         'ground_truth': { 'mask_data': mask[IDX].numpy(), 'class_labels': label_dict }
-                #     }),
-                #     'Plots_Seg_Kmeans/cosine/y': wandb.Image(vol_u8[:, IDX], masks={
-                #         'predictions':  { 'mask_data': pred_cosine[:, IDX] },
-                #         'ground_truth': { 'mask_data': lowres_mask[:, IDX].numpy(), 'class_labels': label_dict }
-                #     }),
-                #     'Plots_Seg_Kmeans/cosine/x': wandb.Image(vol_u8[:, :, IDX], masks={
-                #         'predictions':  { 'mask_data': pred_cosine[:, :, IDX] },
-                #         'ground_truth': { 'mask_data': lowres_mask[:, :, IDX].numpy(), 'class_labels': label_dict }
-                #     })
-                # })
-
-                # PCA Visualization
-                # pcs_logits = project_pca(full_feats)
-                # pcs_cosine = project_pca(full_qs)
-                # log_dict.update({
-                #     'Plots_Feat/pca/logits/z': wandb.Image(pcs_logits[IDX]),
-                #     'Plots_Feat/pca/logits/y': wandb.Image(pcs_logits[:, IDX]),
-                #     'Plots_Feat/pca/logits/x': wandb.Image(pcs_logits[:, :, IDX]),
-                #     'Plots_Feat/pca/cosine/z': wandb.Image(pcs_cosine[IDX]),
-                #     'Plots_Feat/pca/cosine/y': wandb.Image(pcs_cosine[:, IDX]),
-                #     'Plots_Feat/pca/cosine/x': wandb.Image(pcs_cosine[:, :, IDX])
-                # })
 
             wandb.log(log_dict)
             if close_plot:

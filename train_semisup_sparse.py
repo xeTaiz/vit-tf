@@ -72,7 +72,7 @@ if __name__ == '__main__':
     # Get downsampled volume for validation
     lowres_vol  = F.interpolate(make_5d(data['vol']).float(), scale_factor=0.25, mode='nearest')
     lowres_mask = F.interpolate(make_5d(data['mask']),        scale_factor=0.25, mode='nearest').squeeze()
-    vol_u8 = (255.0 * (lowres_vol - lowres_vol.min()) / (lowres_vol.max() - lowres_vol.min())).squeeze().cpu().numpy().astype(np.uint8)
+    vol_u8 = (255.0 * norm_minmax(lowres_vol)).squeeze().cpu().numpy().astype(np.uint8)
     ic(vol_u8)
     lowres_vol = lowres_vol.to(typ).to(dev)
     IDX = min(lowres_vol.shape[-3:]) // 2
@@ -90,7 +90,7 @@ if __name__ == '__main__':
         num_classes -= 1
 
     if NORMALIZE:
-        vol = ((vol.float() - vol.float().mean()) / vol.float().std()).to(typ).to(dev)
+        vol = (norm_mean_std(vol)).to(typ).to(dev)
     else:
         vol = vol.to(typ).to(dev)
     ic(vol)
@@ -151,8 +151,8 @@ if __name__ == '__main__':
             # Anchor n' Positives
             anp_samples = torch.from_numpy(np.random.choice(sample_idxs[NO_CLASS], BS))
             sup_crops = gather_receiptive_fields(make_4d(vol), torch.cat(list({n: class_indices[n][v] for n,v in sup_samples.items()}.values()), dim=0).to(dev), ks=REC_FIELD) # (M*C*2, 1, Z,Y,X)
-            # TODO: use paws transform !!!!
-            anp_crops = gather_receiptive_fields(make_4d(vol), class_indices[NO_CLASS][anp_samples].to(dev), ks=REC_FIELD) # (2*BS, 1, Z,Y,X)
+            anp_crops = gather_receiptive_fields(make_4d(vol), class_indices[NO_CLASS][anp_samples].to(dev), ks=REC_FIELD) # (BS, 1, Z,Y,X)
+            anp_crops = transform_paws_crops(anp_crops)
             crops = torch.cat([sup_crops, anp_crops], dim=0) # (C*2 + C*N, IN, Z,Y,X)
         opt.zero_grad()
         # 1 Feed volume thru networks
