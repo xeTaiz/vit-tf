@@ -25,7 +25,9 @@ if __name__ == '__main__':
     parser.add_argument('--linear-layers', type=str, help='Number of features for linear layers after convs (per voxel)')
     parser.add_argument('--residual', type=str, choices=['true', 'false'], default='false', help='Use skip connections in network')
     parser.add_argument('--lambda-std', type=float, default=0.0, help='Weighting of standard deviation loss')
+    parser.add_argument('--std-loss-on', type=str, default='logits', choices=['logits', 'cosine'], help='What features to compute standard deviation loss.')
     parse_basics(parser)
+
     args = parser.parse_args()
     setup_seed_and_debug(args)
 
@@ -194,7 +196,13 @@ if __name__ == '__main__':
         # Minimize cluster center standard deviation
         if args.lambda_std > 0:
             with torch.autocast('cuda', enabled=False): # The following .mean() needs to be done in FP32
-                std_loss = feature_std(pos_feat, reduce_dim=(1,2), feature_dim=-1)
+                # std_loss = torch.linalg.vector_norm(pos_feat - cc_l2[:, None,None, :], dim=-1).float().mean(dim=(1,2)).sum(0)
+                if args.std_loss_on == 'logits':
+                    std_loss = feature_std(pos_feat, reduce_dim=(1,2), feature_dim=-1)
+                elif args.std_loss_on == 'cosine':
+                    std_loss = feature_std(pos_q, reduce_dim=(1,2), feature_dim=-1)
+                else:
+                    raise Exception(f'Invalid argument for std-loss-on: {args.std_loss_on}')
             loss += args.lambda_std * std_loss.sum(0)
         else:
             std_loss = torch.zeros(1)
