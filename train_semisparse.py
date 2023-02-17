@@ -152,7 +152,7 @@ if __name__ == '__main__':
 
     # Training
     scaler = torch.cuda.amp.GradScaler()
-    opt = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    opt = torch.optim.RAdam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     sched = LR_SCHED(opt)
 
     for i in trange(args.iterations):
