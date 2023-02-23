@@ -3,3 +3,5 @@ wandb/
 checkpoints/
 __pycache__/
 slurm_log/
+figures_*
+*.png
