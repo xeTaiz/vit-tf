@@ -57,9 +57,9 @@ def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ
 
     model = get_dino_model('vits8').to(dev)
     model.eval()
-    feat_out = defaultdict(list)
+    feat_out = []
     def hook_fn_forward_qkv(module, input, output):
-        feat_out['qkv'].append(output.cpu())
+        feat_out.append(output.cpu().half())
     model._modules["blocks"][-1]._modules["attn"]._modules["qkv"].register_forward_hook(hook_fn_forward_qkv)
 
     vol = vol.float().squeeze()
@@ -73,6 +73,8 @@ def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ
     image = normalize(norm_minmax(image), in_mean, in_std)
     im_sz = image.shape[-2:]
 
+    print('Network Input:', image.shape, image.dtype, image.min(), image.max())
+
     # forward pass
     out = []
     with torch.cuda.amp.autocast(enabled=True, dtype=typ):
@@ -80,9 +82,7 @@ def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ
             im_in = image.to(dev)
             for batch in torch.arange(im_in.size(0)).split(batch_size):
                 _ = model(im_in[batch])
-
             attentions = model.get_last_selfattention(im_in[[0]])
-
     # Scaling factor
     scales = [patch_size, patch_size]
 
@@ -93,32 +93,23 @@ def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ
 
     # Extract the qkv features of the last attention layer
     qkv = (
-        torch.cat(feat_out["qkv"][:-1])
-        .reshape(nb_im, nb_tokens, 3, nh, -1 // nh)
+        torch.cat(feat_out[:-1])
+        .view(nb_im, nb_tokens, 3, nh, -1 // nh)
         .permute(2, 0, 3, 1, 4)
     )
     q, k, v = qkv[0].cpu(), qkv[1].cpu(), qkv[2].cpu()
     f_sz = im_sz[0] // patch_size , im_sz[1] // patch_size
-    k = k.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
-    k = k[:, 1:].reshape(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-    q = q.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
-    q = q[:, 1:].reshape(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-    v = v.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
-    v = v[:, 1:].reshape(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
+    k = k.transpose(1, 2).view(nb_im, nb_tokens, -1)
+    k = k[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
+    q = q.transpose(1, 2).view(nb_im, nb_tokens, -1)
+    q = q[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
+    v = v.transpose(1, 2).view(nb_im, nb_tokens, -1)
+    v = v[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
     qkv = {
-        'q': q.permute(*permute_out).contiguous(),
-        'k': k.permute(*permute_out).contiguous(),
-        'v': v.permute(*permute_out).contiguous()
+        'q': q.permute(*permute_out),
+        'k': k.permute(*permute_out),
+        'v': v.permute(*permute_out)
     }
-    # Cleanup CUDA
-    if dev != torch.device('cpu'):
-        del model
-        del im_in
-        del attentions
-        torch.cuda.empty_cache()
-        mem_alloc, mem_cache = torch.cuda.memory_allocated()/1024**2, torch.cuda.memory_cached()/1024**2
-        if mem_alloc > 0 or mem_cache > 0:
-            print(f'PyTorch has {mem_alloc}MB allocated and {mem_cache}MB cached on CUDA.')
     return qkv
 
 if __name__ == '__main__':
@@ -174,18 +165,19 @@ if __name__ == '__main__':
         elif data_path.suffix == '.npy':
             data = np.load(data_path, allow_pickle=True)
             if data.dtype == "O":
-                vol = torch.from_numpy(data[()]['vol'])
+                vol = torch.from_numpy(data[()]['vol'].astype(np.float32))
             else:
-                vol = torch.from_numpy(data)
+                vol = torch.from_numpy(data.astype(np.float32))
             print(f'Loaded volume: {vol.shape} of type {vol.dtype}.')
             assert vol.ndim == 3
         else:
             print(f'Unsupported file extension: {data_path.suffix}')
 
         qkv = compute_qkv(vol, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
+        print(f'Computed qkv, saving now to: {cache_path}')
         if cache_path.suffix in ['.pt', '.pth']:
             torch.save(qkv, cache_path)
         elif cache_path.suffix == '.npy':
-            np.save(cache_path, qkv)
+            np.save(cache_path, {k: v.numpy() for k,v in qkv.items()})
     
     sys.exit(0)
