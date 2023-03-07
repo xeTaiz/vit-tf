@@ -10,9 +10,18 @@ from sklearn.decomposition import PCA
 
 from icecream import ic, argumentToString
 @argumentToString.register(np.ndarray)
-def _(t): return f'{tuple(t.shape)} of type {t.dtype} (NumPy) in value range [{t.min().item():.3f}, {t.max().item():.3f}]'
+def _(t):
+    contig = f'{"C" if t.flags["C_CONTIGUOUS"]} {"F" if t.flags["F_CONTIGUOUS"]}'.strip()
+    if len(contig) == 0: contig = "NOT"
+    return f'{tuple(t.shape)} of type {t.dtype} (NumPy) in value range [{t.min().item():.3f}, {t.max().item():.3f}] ({contig} contiguous)'
+
 @argumentToString.register(torch.Tensor)
-def _(t): return f'{tuple(t.shape)} of type {t.dtype} ({t.device.type}) in value range [{t.min().item():.3f}, {t.max().item():.3f}]'
+def _(t):
+    if t.is_contiguous():
+        contig = '(C contiguous)'
+    else:
+        contig = '(NOT contiguous!!)'
+    return f'{tuple(t.shape)} of type {t.dtype} ({t.device.type}) in value range [{t.min().item():.3f}, {t.max().item():.3f}] {contig}'
 ic.configureOutput(prefix='')
 
 def setup_seed_and_debug(args):

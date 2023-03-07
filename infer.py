@@ -52,6 +52,35 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
     feats = F.grid_sample(make_5d(feat_vol), grid_idx, mode=mode, align_corners=False)
     return feats.squeeze(0).squeeze(1).permute(1,2,0).contiguous()
 
+def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0):
+    ''' Re-samples the feature volume at the `K` most similar locations.
+    
+    Args:
+        feat_vol (Tensor): (Normalized) Feature Volume. Shape (F, W, H, D)
+        sims (Tensor): Similarity Volume for classes C with A annotations. Shape (C, A, W, H, D)
+        K (int): Number of new samples to draw per annotation (and per class)
+        similarity_exponent (float): Exponent to sharpen similarity maps (sim ** exponent)
+
+    Returns:
+        Tensor: Similarity Volume of shape (C, A, W, H, D)
+    '''
+    if K > 4: 
+        dev, typ = torch.device('cpu'), torch.float32
+    else:
+        dev, typ = feat_vol.device, feat_vol.dtype
+    top_ks = []
+    for s in sims.reshape(-1, sims.size(2), sims.size(3), sims.size(4)):
+        top_idxs = torch.topk(s.flatten(), K, largest=True, sorted=True).values[-1]
+        top_idxs_nd = (s >= top_idxs).nonzero()[:K]
+        top_ks.append(top_idxs_nd)
+    top_ks = torch.stack(top_ks).reshape(*sims.shape[:2], K, 3)
+    rel_top_ks = (top_ks.float() + 0.5) / torch.tensor([[[sims.shape[-3:]]]], device=top_ks.device) * 2.0 - 1.0
+    c, a, k, _ = top_ks.shape
+    qf2 = sample_features3d(feat_vol, rel_top_ks.view(c, a*k, 3), mode='nearest')
+    qf2 = qf2.reshape(c, a, k, qf2.size(-1))
+    sims = torch.einsum('fwhd,cakf->cakwhd', (feat_vol.to(dev).to(typ), qf2.to(dev).to(typ))).clamp(0, 1) ** similarity_exponent
+    return sims.mean(dim=2).to(feat_vol.dtype).to(feat_vol.device)
+
 def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ=torch.float32):
     patch_size = 8
 
@@ -135,8 +164,9 @@ if __name__ == '__main__':
     parser.add_argument('--data-path', type=str, required=True, help='Path to the saved volume')
     parser.add_argument('--cache-path', type=str, required=True, help='Path to save computed qkv features to.')
     parser.add_argument('--dino-model', type=str, choices=dino_archs, default='vits8', help='DINO model to use')
-    parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
+    parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
     parser.add_argument('--batch-size', type=int, default=2, help='Feed volume through network in batches')
+    parser.add_argument('--feature-resolution', type=int, default=128, help='Rescales the feature map to given dim D^3 when using --slice-along all')
     args = parser.parse_args()
 
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -172,8 +202,16 @@ if __name__ == '__main__':
             assert vol.ndim == 3
         else:
             print(f'Unsupported file extension: {data_path.suffix}')
-
-        qkv = compute_qkv(vol, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
+        if args.slice_along in ['x', 'y', 'z']:
+            qkv = compute_qkv(vol, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
+        elif args.slice_along == 'all':
+            feat_res = (args.feature_resolution, args.feature_resolution, args.feature_resolution)
+            qkv = {'q': 0, 'k': 0, 'v': 0}
+            for ax in ['x', 'y', 'z']:
+                for k,v in compute_qkv(vol, batch_size=args.batch_size, slice_along=ax, dev=dev, typ=typ).items():
+                    qkv[k] += (F.interpolate(make_5d(v).float(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / 3.0).half()
+        else:
+            raise Exception(f'Invalid argument for --slice-along: {args.slice_along}. Must be x,y,z or all')
         print(f'Computed qkv, saving now to: {cache_path}')
         if cache_path.suffix in ['.pt', '.pth']:
             torch.save(qkv, cache_path)
