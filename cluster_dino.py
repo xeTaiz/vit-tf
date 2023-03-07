@@ -15,6 +15,7 @@ import icecream as ic
 from torchvtk.utils import make_4d, make_5d
 from domesutils import *
 from bilateral_solver import apply_bilateral_solver
+from bilateral_solver3d import apply_bilateral_solver3d
 
 in_mean = [0.485, 0.456, 0.406]
 in_std = [0.229, 0.224, 0.225]
@@ -253,7 +254,6 @@ if __name__ == '__main__':
     parser.add_argument('--attention-features', type=str, default='k', choices=['q', 'k', 'v'], help='Which of the attention features to use.')
     parser.add_argument('--similarity-exponent', type=float, default=2.0, help='Raise similarity to the given power to suppress non-similars')
     parser.add_argument('--minmax-norm-similarities', type=str, default='false', choices=['true', 'false'], help='Whether to normalize averaged similarity maps to [0,1] range')
-    parser.add_argument('--drop-sims-below', type=float, default=0.0, help='Sets low similarities to 0 (except for background class)')
     parser.add_argument('--background-class', type=str, default='background', help='Name of background class for dropping low similarities')
     parser.add_argument('--bilateral-solver', type=str, default='true', choices=['true', 'false'], help='Whether to apply bilateral solver')
     parser.add_argument('--resample-similarities', type=int, default=8, help='Resamples features of K most similar locations to reinforce similarity map')
@@ -262,8 +262,8 @@ if __name__ == '__main__':
     setup_seed_and_debug(args)
 
 
-    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    typ = torch.float16 if args.fp16 == 'true' else torch.float32
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu') #torch.device('cpu')
+    typ = torch.float16 if args.fp16 == 'true' and dev == torch.device('cuda') else torch.float32
     BG_CLASS = args.background_class
 
     cache_path = Path(args.data.replace('volume', f'{args.dino_model}_feats_along_{args.slice_along}'))
@@ -278,7 +278,7 @@ if __name__ == '__main__':
         else: # Compute and save features
             qkv = compute_and_save_qkv(args, dev=dev, typ=typ)
 
-        feat_vol = qkv[args.attention_features].to(dev)
+        feat_vol = qkv[args.attention_features].to(dev).to(typ)
         # Load Data, Mask
         data = torch.load(data_path)
         mask = data['mask']
@@ -322,20 +322,34 @@ if __name__ == '__main__':
         avg_sims = sims.max(dim=1).values.clamp(0,1) # Average similarity per class over its annotations
         ic(avg_sims)
 
+        # Bilateral Solver
+        bls = {'sigma_spatial': 3, 'sigma_chroma': 3, 'sigma_luma': 3}
+        if args.minmax_norm_similarities == 'true':
+            avg_sims = avg_sims / avg_sims.max(dim=0, keepdim=True).values
+        if args.bilateral_solver == 'true':
+            bl_res = (128, 128, 124)
+            ic(avg_sims)
+            bl_vol_u8 = F.interpolate(make_5d(vol_u8), bl_res, mode='nearest').squeeze(0)
+            bl_asim   = F.interpolate(make_5d(avg_sims),       bl_res, mode='nearest').squeeze(0) ** 2.0
+            #bl_asim /= bl_asim.max(dim=0, keepdim=True).values
+            blsim = torch.stack([norm_minmax(apply_bilateral_solver3d(bl_asim[[i]], bl_vol_u8.expand(3, -1,-1,-1), grid_params=bls)) for i in range(num_classes)])
+            ic(avg_sims)
+            ic(bl_asim)
+            ic(bl_vol_u8)
+            ic(blsim)
+
         # Compute IoUs
         jaccard = JaccardIndex(num_classes=num_classes, average=None).to(dev)
-        lowres_mask = F.interpolate(make_5d(mask.to(dev)), avg_sims.shape[-3:], mode='nearest').squeeze()
-        if args.drop_sims_below > 0.0: # Discard low similarities
-            low_sim_mask = avg_sims[NON_BG_IDX] < args.drop_sims_below
-            avg_sims[NON_BG_IDX][low_sim_mask] = 0.0
-        pred_mask = avg_sims.argmax(0)
+        pred_sims = blsim if args.bilateral_solver == 'true' else avg_sims
+        lowres_mask = F.interpolate(make_5d(mask.to(dev)), pred_sims.shape[-3:], mode='nearest').squeeze()
+        pred_mask = pred_sims.argmax(0)
+        ic(pred_mask)
+        ic(lowres_mask)
         ious =  jaccard(pred_mask, lowres_mask)
         iou_dict = {label_dict[i]: v.cpu().item() for i,v in enumerate(ious)}
         ic(iou_dict)
 
         # Plotting
-        if args.minmax_norm_similarities == 'true':
-            avg_sims = avg_sims / avg_sims.max(dim=0, keepdim=True).values
         for i in range(num_classes):
             torch.save(avg_sims[i], f'similarity_images/{label_dict[i]}.pt')
             for a in range(args.annotations_per_class)[:4]:
@@ -355,30 +369,35 @@ if __name__ == '__main__':
                 asim_z = F.interpolate(make_4d(avg_sims[i,    :, :, aZ]), (mask.size(0), mask.size(1)), mode='nearest').squeeze()
                 # pmask_z = F.interpolate(make_4d(pred_mask[:,:,aZ]).float(), (mask.size(0), mask.size(1)), mode='nearest').squeeze().round().long()
 
-                if args.bilateral_solver:
-                    bls = {'sigma_spatial': 16, 'sigma_chroma': 4, 'sigma_luma': 4}
-                    ic(asim_x)
-                    ic(asim_y)
-                    ic(asim_z)
-                    # asim_x[asim_x < 0.2] = 0
-                    # asim_y[asim_y < 0.2] = 0
-                    # asim_z[asim_z < 0.2] = 0
-                    # asim_x = norm_minmax(asim_x)
-                    # asim_y = norm_minmax(asim_y)
-                    # asim_z = norm_minmax(asim_z)
+                # if args.bilateral_solver == 'true':
+                #     ic(asim_x)
+                #     ic(asim_y)
+                #     ic(asim_z)
+                #     # asim_x[asim_x < 0.2] = 0
+                #     # asim_y[asim_y < 0.2] = 0
+                #     # asim_z[asim_z < 0.2] = 0
+                #     # asim_x = norm_minmax(asim_x)
+                #     # asim_y = norm_minmax(asim_y)
+                #     # asim_z = norm_minmax(asim_z)
 
-                    tasim_x = torch.pow(asim_x, 2.0)
-                    tasim_y = torch.pow(asim_y, 2.0)
-                    tasim_z = torch.pow(asim_z, 2.0)
-                    blasim_x0, blasim_x = apply_bilateral_solver(tasim_x[None], vol_u8[None, X, :, :].expand(3, -1,-1), grid_params=bls)
-                    blasim_y0, blasim_y = apply_bilateral_solver(tasim_y[None], vol_u8[None, :, Y, :].expand(3, -1,-1), grid_params=bls)
-                    blasim_z0, blasim_z = apply_bilateral_solver(tasim_z[None], vol_u8[None, :, :, Z].expand(3, -1,-1), grid_params=bls)
-                    blasim_x = norm_minmax(blasim_x)
-                    blasim_y = norm_minmax(blasim_y)
-                    blasim_z = norm_minmax(blasim_z)
-                    ic(blasim_x)
-                    ic(blasim_y)
-                    ic(blasim_z)
+                #     tasim_x = torch.pow(asim_x, 2.0)
+                #     tasim_y = torch.pow(asim_y, 2.0)
+                #     tasim_z = torch.pow(asim_z, 2.0)
+                #     blasim_x0, blasim_x = apply_bilateral_solver(tasim_x[None], vol_u8[None, X, :, :].expand(3, -1,-1), grid_params=bls)
+                #     blasim_y0, blasim_y = apply_bilateral_solver(tasim_y[None], vol_u8[None, :, Y, :].expand(3, -1,-1), grid_params=bls)
+                #     blasim_z0, blasim_z = apply_bilateral_solver(tasim_z[None], vol_u8[None, :, :, Z].expand(3, -1,-1), grid_params=bls)
+                #     blasim_x = norm_minmax(blasim_x)
+                #     blasim_y = norm_minmax(blasim_y)
+                #     blasim_z = norm_minmax(blasim_z)
+                #     ic(blasim_x)
+                #     ic(blasim_y)
+                #     ic(blasim_z)
+                tasim_x = torch.pow(asim_x, 2.0)
+                tasim_y = torch.pow(asim_y, 2.0)
+                tasim_z = torch.pow(asim_z, 2.0)
+                blasim_x = F.interpolate(blsim[None, [i], 2*aX, :, :], (mask.size(1), mask.size(2)), mode='nearest').squeeze()
+                blasim_y = F.interpolate(blsim[None, [i], :, 2*aY, :], (mask.size(0), mask.size(2)), mode='nearest').squeeze()
+                blasim_z = F.interpolate(blsim[None, [i], :, :, 2*aZ], (mask.size(0), mask.size(1)), mode='nearest').squeeze()
                 fig = plot_sims_xyz(
                     (vol_u8[X,:,:], vol_u8[:,Y,:], vol_u8[:,:,Z]),
                     (asim_x, asim_y, asim_z),
