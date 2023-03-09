@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import sys
+from collections import defaultdict
 from pathlib import Path
 NTF_REPO = '/home/dome/Dev/ntf'
 sys.path.append(NTF_REPO)
@@ -245,22 +246,32 @@ def lockedNetwork(net=None):
     finally:
         net.unlock()
 
-def get_annotations(proc_name, typ=torch.float32, dev=torch.device('cpu')):
+def get_annotations(proc_name, typ=torch.float32, dev=torch.device('cpu'), return_empty=False, return_ids=False):
+    THRESH = -1 if return_empty else 0
     dino_proc = get_processor(proc_name)
     annotations = { 
         ntf.identifier: np.array([a.value.array for a in ntf.properties['annotations'].properties])
-        for ntf in dino_proc.tfs.properties 
+        for ntf in dino_proc.tfs.properties if len(ntf.annotations.properties) > THRESH
     }
-    return {k: torch.from_numpy(v.astype(np.int64)).to(typ).to(dev) for k,v in annotations.items()}#{k: torch.from_numpy(v.astype(np.int64)) for k,v in annotations.items() if v.shape[0] > 0}
+    annotations = { k: torch.from_numpy(v.astype(np.int64)).to(typ).to(dev) for k,v in annotations.items() }
+    if return_ids:
+        annotation_ids = { 
+            ntf.identifier: set(a.identifier for a in ntf.annotations.properties)
+            for ntf in dino_proc.tfs.properties if len(ntf.annotations.properties) > THRESH
+        }
+        return annotations, annotation_ids
+    else:
+        return annotations
 
-def get_similarity_params(proc_name):
+def get_similarity_params(proc_name, return_empty=False):
+    THRESH = -1 if return_empty else 0
     dino_proc = get_processor(proc_name)
     return { 
         ntf.identifier: {
             'exponent': ntf.properties['simexponent'].value,
             'threshold': ntf.properties['simthresh'].value,
             'normalize': ntf.properties['normBeforeBilat'].value
-        } for ntf in dino_proc.tfs.properties 
+        } for ntf in dino_proc.tfs.properties if len(ntf.annotations.properties) > THRESH
     }
 
 def is_path_creatable(pathname: str) -> bool:
@@ -283,8 +294,9 @@ class DinoSimilarities(ivw.Processor):
         self.dinoProcessorIdentifier = ivw.properties.StringProperty("dinoProcId", "DINO Volume Renderer Identifier", "DINOVolumeRenderer")
         self.useCuda = ivw.properties.BoolProperty("useCuda", "Use CUDA", False)
         self.cleanupTemporaryVolume = ivw.properties.BoolProperty("cleanupTempVol", "Clean up volume that's temporarily created on disk to pass to infer.py", False)
-        self.similarityVolumeScalingFactor = ivw.properties.FloatProperty("simScaleFact", "Similarity Volume Downscale Factor", 4.0, 1.0, 8.0)
-        self.runWithScaling = ivw.properties.ButtonProperty("runWithScaling", "Run with scaling", )
+        self.similarityVolumeScalingFactor = ivw.properties.FloatProperty("simScaleFact", "Similarity Volume Downscale Factor", 8.0, 1.0, 8.0)
+        self.similarityVolumeScalingFactor.invalidationLevel = ivw.properties.InvalidationLevel.Valid
+        # self.runWithScaling = ivw.properties.ButtonProperty("runWithScaling", "Run with scaling")
         self.updatePorts = ivw.properties.ButtonProperty("updateEverything", "Update Callbacks, Ports & Connections", self.updateCallbacksPortsAndConnections)
         self.sliceAlong = ivw.properties.OptionPropertyString("sliceAlong", "DINO Slice along Axis", [
             ivw.properties.StringOption("alongALL", 'Slice along ALL', 'all'),
@@ -306,11 +318,11 @@ class DinoSimilarities(ivw.Processor):
         self.addProperty(self.sigmaLuma)
         # Callbacks
         self.inport.onChange(self.getVolumeDataPath)
-        self.inport.onChange(self.loadVolume)
         self.useCuda.onChange(self.updateFeatvolDevice)
         self.dinoProcessorIdentifier.onChange(self.updateCallbacksPortsAndConnections)
         # Init other variables
         self.outs = {}
+        self.annotation_ids = defaultdict(set)
         self.registeredCallbacks = {}
         self.feat_vol = None
         self.vol = None
@@ -348,22 +360,29 @@ class DinoSimilarities(ivw.Processor):
     def registerCallbacks(self):
         print('registerCallbacks()')
         proc = get_processor(self.dinoProcessorIdentifier.value)
+        print("Before:")
+        for p, c in self.registeredCallbacks.items(): print(f'{p}:', c)
         # Register this function as callback on annotations list property
         if proc.annotationButtons.path not in self.registeredCallbacks.keys():
             cb = proc.annotationButtons.onChange(self.updateCallbacksPortsAndConnections)
             self.registeredCallbacks[proc.annotationButtons.path] = cb 
+        # Remove Callbacks from old "Add to Class" buttons
+        # existing_buttons = list(map(lambda btn: btn.path, proc.annotationButtons.properties))
+        # for oldBtn in set(existing_buttons - self.registeredCallbacks.keys())
         # Register Callbacks for "Add to Class" buttons
         for btnProp in proc.annotationButtons.properties:
-            if btnProp.path not in self.registeredCallbacks:
+            if btnProp.path not in self.registeredCallbacks.keys():
                 cb = btnProp.onChange(self.invalidateOutput)
                 self.registeredCallbacks[btnProp.path] = cb
         # Register Callbacks for transfer functions
         for ntfProp in proc.tfs.properties:
             for tfProp in ntfProp.properties:
                 if tfProp.identifier in ['simexponent', 'simthresh', 'normBeforeBilat'] \
-                and tfProp.path not in self.registeredCallbacks:
+                and tfProp.path not in self.registeredCallbacks.keys():
                     cb = tfProp.onChange(self.invalidateOutput)
                     self.registeredCallbacks[tfProp.path] = cb
+        print("After:")
+        for c in self.registeredCallbacks.keys(): print(c)
 
     def invalidateOutput(self): 
         print('Invalidating Output!')
@@ -376,7 +395,7 @@ class DinoSimilarities(ivw.Processor):
 
     def addVolumeOutports(self):
         print('addVolumeOutports()')
-        new_names = set(get_similarity_params(self.dinoProcessorIdentifier.value).keys())
+        new_names = set(get_similarity_params(self.dinoProcessorIdentifier.value, return_empty=True).keys())
         cur_names = set(self.outs.keys())
         for k in (cur_names - new_names):
             self.removeOutport(self.outs[k])
@@ -390,19 +409,21 @@ class DinoSimilarities(ivw.Processor):
         proc = get_processor(self.dinoProcessorIdentifier.value)
         simInport = proc.getInport('similarity')
         net = get_network()
+        ports_with_data = get_similarity_params(self.dinoProcessorIdentifier.value, return_empty=False).keys()
         with lockedNetwork(net):
             for k,v in self.outs.items():
                 print(f'Connection between {simInport.identifier} and {v.identifier}: {simInport.isConnectedTo(v)}')
-                if not simInport.isConnectedTo(v):
+                if not simInport.isConnectedTo(v) and k in ports_with_data:
                     # simInport.connectTo(v) # does not fully connect the ports (visual link is missing, some things go wrong)
                     net.addConnection(v, simInport)
                     print(f'Connecting {simInport.identifier} to {v.identifier}.')
 
     def updateFeatvolDevice(self):
         print('updateFeatvolDevice()')
-        dev = torch.device("cuda" if torch.cuda.is_available and self.useCuda.value else "cpu")
-        typ = torch.float16 if dev == torch.device("cuda") else torch.float32
-        self.feat_vol = self.feat_vol.to(dev).to(typ)
+        if self.feat_vol is not None:
+            dev = torch.device("cuda" if torch.cuda.is_available and self.useCuda.value else "cpu")
+            typ = torch.float16 if dev == torch.device("cuda") else torch.float32
+            self.feat_vol = self.feat_vol.to(dev).to(typ)
 
     def loadCache(self, cache_path, attention_features='k'):
         print('loadCache()')
@@ -426,29 +447,19 @@ class DinoSimilarities(ivw.Processor):
         self.feat_vol = F.normalize(feat_vol.to(typ).to(dev), dim=0)
         log('Loaded self.feat_vol', self.feat_vol)
 
-    def loadVolume(self, use_featvol_dims=True):
-        print('loadVolume()')
-        vol = np.ascontiguousarray(self.inport.getData().data).astype(np.float32)
-        self.dims = tuple(vol.shape[:3])
-        log('self.feat_vol', self.feat_vol)
-        # if use_featvol_dims and self.feat_vol is not None:
-        #     sim_shape = tuple(self.feat_vol.shape[-3:])
-        # else:
-        sim_shape = tuple(self.feat_vol.shape[-3:])
-        other_vol = F.interpolate(make_5d(norm_minmax(torch.from_numpy(vol))), sim_shape, mode='nearest').squeeze(0)
-        log('other_vol', other_vol)
-        sim_shape = tuple((torch.tensor([*self.dims]) // self.similarityVolumeScalingFactor.value).long().tolist())
-        vol_resized = F.interpolate(make_5d(norm_minmax(torch.from_numpy(vol))), sim_shape, mode='nearest').squeeze(0)
-        log('vol_resized', vol_resized)
-        self.vol = (255.0 * vol_resized).to(torch.uint8)
-        log('Updated self.vol', self.vol)
-
     def computeSimilarities(self):
         print('computeSimilarities()')
         with torch.no_grad():
             dev, typ = self.feat_vol.device, self.feat_vol.dtype
             simparams = get_similarity_params(self.dinoProcessorIdentifier.value)
-            annotations = get_annotations(self.dinoProcessorIdentifier.value, dev=dev, typ=typ)
+            annotations, annotation_ids = get_annotations(self.dinoProcessorIdentifier.value, dev=dev, typ=typ, return_ids=True)
+            to_remove = set(self.annotation_ids.keys()) - set(annotation_ids.keys())
+            # for r in to_remove: del self.annotation_ids[r]
+            # to_update = {}
+            # for k, a in annotation_ids.items():
+            #     to_update[k] = a - self.annotation_ids[k] # Set difference
+            #     self.similarities[k] = a # Do later
+            print('to_update', { k: len(v) for k,v in annotation_ids.items() })
             def split_into_classes(t):
                 sims = {}
                 idx = 0
@@ -456,10 +467,22 @@ class DinoSimilarities(ivw.Processor):
                     sims[k] = t[idx:idx+v.size(0)]
                     idx += v.size(0)
                 return sims
-            if len(annotations) == 0: return
-            vol_extent = torch.tensor([[[*self.dims]]], device=dev, dtype=typ)
+            if len(annotations) == 0: return  # No NTFs
             abs_coords = torch.cat(list(annotations.values()))
+            if abs_coords.numel() == 0: return # No annotation in any of the NTFs
+            in_vol = np.ascontiguousarray(self.inport.getData().data).astype(np.float32)
+            in_dims = tuple(in_vol.shape[:3])
+            vol_extent = torch.tensor([[[*in_dims]]], device=dev, dtype=typ)
             rel_coords = (abs_coords.float() + 0.5) / vol_extent * 2.0 - 1.0
+            log('in_vol', in_vol)
+            sim_shape = tuple(map(lambda d: int(d // self.similarityVolumeScalingFactor.value), in_dims))
+            print('sim_shape', sim_shape)
+            # vol = F.interpolate(make_5d(torch.from_numpy(in_vol.copy())), self.feat_vol.shape[-3:], mode='nearest').squeeze(0)
+            vol = F.interpolate(make_5d(torch.from_numpy(in_vol.copy())), sim_shape, mode='nearest').squeeze(0)
+            vol = (255.0 * norm_minmax(vol)).to(torch.uint8)
+            log('vol', vol)
+            # log('vol2', vol2)
+            # vol = F.interpolate(make_5d(torch.from_numpy(in_vol)).clone(), sim.shape[-3:], mode='nearest').squeeze(0)
 
             qf = sample_features3d(self.feat_vol, rel_coords, mode='nearest')
             sims = torch.einsum('fwhd,caf->cawhd', (self.feat_vol, qf))
@@ -478,12 +501,22 @@ class DinoSimilarities(ivw.Processor):
                 # Apply Bilateral Solver
                 if simparams[k]['normalize']:
                     sim /= sim.max()
-                if sim.shape[-3:] != self.vol.shape[-3:]:
-                    print('Resizing similarity to', tuple(self.vol.shape[-3:]))
-                    sim = F.interpolate(make_5d(sim), self.vol.shape[-3:], mode='nearest').squeeze(0)
-                blsim = apply_bilateral_solver3d(sim, self.vol.expand(3,-1,-1,-1), grid_params=bls_params)
-                sim_split[k] = (255.0 / blsim.max() * blsim).cpu().to(torch.uint8)
+                if tuple(sim.shape[-3:]) != sim_shape:
+                    print('Resizing input vol to', sim_shape)
+                    # vol = F.interpolate(make_5d(torch.from_numpy(in_vol)).clone(), sim.shape[-3:], mode='nearest').squeeze(0)
+                    # vol = (255.0 * norm_minmax(vol)).to(torch.uint8)
+                    sim = F.interpolate(make_5d(sim), sim_shape, mode='nearest').squeeze(0)
+                # log('vol', vol)
+                log('sim', sim)
+                blsim = apply_bilateral_solver3d(make_4d(sim), vol.expand(3,-1,-1,-1), grid_params=bls_params)
+                log('blsim', blsim)
+                sim_split[k] = (255.0 / blsim.max() * blsim).cpu().to(torch.uint8).squeeze()
+                # sim_split[k] = (255.0 / sim.max() * sim).cpu().to(torch.uint8).squeeze()
+                log(k, sim_split[k])
             return sim_split
+
+    def updateSimilarities(self):
+        pass
 
     def initializeResources(self):
         print('initializeResources()')
@@ -495,7 +528,6 @@ class DinoSimilarities(ivw.Processor):
             self.addAndConnectOutports() # Add volume outports for similarities if necessary and connect to DINOVolumeRenderer
             self.registerCallbacks() # Registers callbacks on DINOVolumeRenderer's NTF properties
         elif self.inport.hasData(): # Compute and cache feat_vol
-            self.loadVolume()  # Loads self.vol and sets self.dims
             if is_path_creatable(str(self.cache_path)): # only if we can save to cache_path
                 print(f'Computing features and saving cache to {self.cache_path}')
                 # Save incoming volume temporarily as .npy
@@ -522,13 +554,18 @@ class DinoSimilarities(ivw.Processor):
         if self.feat_vol is None:
             self.initializeResources() # If there's no feat_vol, try to load it
         else:
-            similarities = self.computeSimilarities() # Compute similarity maps
-            # print({k:v.shape for k,v in similarities.items()})
-            if similarities is None or len(similarities) == 0:
-                print('Could not compute similarities. Did you annotate anything?')
+            print(self.outs.keys())
+            print(get_similarity_params(self.dinoProcessorIdentifier.value, return_empty=False).keys())
+            if set(self.outs.keys()) != set(get_similarity_params(self.dinoProcessorIdentifier.value, return_empty=False).keys()):
+                self.connectVolumeOutports()
+            self.similarities = self.computeSimilarities() # Compute similarity maps
+            # print({k:v.shape for k,v in self.similarities.items()})
+            if self.similarities is None or len(self.similarities) == 0:
+                print('Could not compute self.similarities. Did you annotate anything?')
             else: # Output similarity volumes through volume outports
                 in_vol = self.inport.getData() # ivw.Volume
-                for k,v in similarities.items():
+                for k,v in self.similarities.items():
+                    log('setData() with', v)
                     volume = ivw.data.Volume(np.asfortranarray(v.numpy()))
                     volume.modelMatrix = in_vol.modelMatrix
                     volume.worldMatrix = in_vol.worldMatrix
