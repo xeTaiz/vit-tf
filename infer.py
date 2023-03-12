@@ -52,7 +52,7 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
     feats = F.grid_sample(make_5d(feat_vol), grid_idx, mode=mode, align_corners=False)
     return feats.squeeze(0).squeeze(1).permute(1,2,0).contiguous()
 
-def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0):
+def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0, feature_sampling_mode='nearest'):
     ''' Re-samples the feature volume at the `K` most similar locations.
     
     Args:
@@ -60,6 +60,7 @@ def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0):
         sims (Tensor): Similarity Volume for classes C with A annotations. Shape (C, A, W, H, D)
         K (int): Number of new samples to draw per annotation (and per class)
         similarity_exponent (float): Exponent to sharpen similarity maps (sim ** exponent)
+        feature_sampling_mode (str): PyTorch grid_sample interpolation mode for sampling features
 
     Returns:
         Tensor: Similarity Volume of shape (C, A, W, H, D)
@@ -76,7 +77,7 @@ def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0):
     top_ks = torch.stack(top_ks).reshape(*sims.shape[:2], K, 3)
     rel_top_ks = (top_ks.float() + 0.5) / torch.tensor([[[sims.shape[-3:]]]], device=top_ks.device) * 2.0 - 1.0
     c, a, k, _ = top_ks.shape
-    qf2 = sample_features3d(feat_vol, rel_top_ks.view(c, a*k, 3), mode='nearest')
+    qf2 = sample_features3d(feat_vol, rel_top_ks.view(c, a*k, 3), mode=feature_sampling_mode)
     qf2 = qf2.reshape(c, a, k, qf2.size(-1))
     sims = torch.einsum('fwhd,cakf->cakwhd', (feat_vol.to(dev).to(typ), qf2.to(dev).to(typ))).clamp(0, 1) ** similarity_exponent
     return sims.mean(dim=2).to(feat_vol.dtype).to(feat_vol.device)
@@ -166,7 +167,7 @@ if __name__ == '__main__':
     parser.add_argument('--dino-model', type=str, choices=dino_archs, default='vits8', help='DINO model to use')
     parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
     parser.add_argument('--batch-size', type=int, default=2, help='Feed volume through network in batches')
-    parser.add_argument('--feature-resolution', type=int, default=128, help='Rescales the feature map to given dim D^3 when using --slice-along all')
+    parser.add_argument('--feature-downsize-factor', type=int, default=4, help='Rescales the feature map to input volume extent // this factor. With a ViTs8 this needs to be 8 to prevent upscaling of feature maps. Only if --slice-along ALL')
     args = parser.parse_args()
 
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -205,7 +206,8 @@ if __name__ == '__main__':
         if args.slice_along in ['x', 'y', 'z']:
             qkv = compute_qkv(vol, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
         elif args.slice_along == 'all':
-            feat_res = (args.feature_resolution, args.feature_resolution, args.feature_resolution)
+            feat_res = tuple(map(lambda d: int(d // args.feature_downsize_factor), vol.shape))
+            # feat_res = (args.feature_resolution, args.feature_resolution, args.feature_resolution)
             qkv = {'q': 0, 'k': 0, 'v': 0}
             for ax in ['x', 'y', 'z']:
                 for k,v in compute_qkv(vol, batch_size=args.batch_size, slice_along=ax, dev=dev, typ=typ).items():
