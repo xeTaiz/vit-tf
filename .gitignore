@@ -5,3 +5,4 @@ __pycache__/
 slurm_log/
 figures_*
 *.png
+similarity_images/
