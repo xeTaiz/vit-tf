@@ -8,7 +8,7 @@ def make_nd(t, n):
     '''  Prepends singleton dimensions to `t` until n-dimensional '''
     if n < t.ndim:
         raise Exception(f'make_nd cannot reduce cardinality. Your Tensor.ndim={t.ndim} > n={n}.')
-    elif n == t.ndim: 
+    elif n == t.ndim:
         return t
     else:
         nons = [None]*(n-t.ndim)
@@ -54,7 +54,7 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
 
 def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0, feature_sampling_mode='nearest'):
     ''' Re-samples the feature volume at the `K` most similar locations.
-    
+
     Args:
         feat_vol (Tensor): (Normalized) Feature Volume. Shape (F, W, H, D)
         sims (Tensor): Similarity Volume for classes C with A annotations. Shape (C, A, W, H, D)
@@ -65,7 +65,7 @@ def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0, feature_sampling
     Returns:
         Tensor: Similarity Volume of shape (C, A, W, H, D)
     '''
-    if K > 4: 
+    if K > 4:
         dev, typ = torch.device('cpu'), torch.float32
     else:
         dev, typ = feat_vol.device, feat_vol.dtype
@@ -166,7 +166,7 @@ if __name__ == '__main__':
     parser.add_argument('--cache-path', type=str, required=True, help='Path to save computed qkv features to.')
     parser.add_argument('--dino-model', type=str, choices=dino_archs, default='vits8', help='DINO model to use')
     parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
-    parser.add_argument('--batch-size', type=int, default=2, help='Feed volume through network in batches')
+    parser.add_argument('--batch-size', type=int, default=1, help='Feed volume through network in batches')
     parser.add_argument('--feature-downsize-factor', type=int, default=4, help='Rescales the feature map to input volume extent // this factor. With a ViTs8 this needs to be 8 to prevent upscaling of feature maps. Only if --slice-along ALL')
     args = parser.parse_args()
 
@@ -199,6 +199,11 @@ if __name__ == '__main__':
                 vol = torch.from_numpy(data[()]['vol'].astype(np.float32))
             else:
                 vol = torch.from_numpy(data.astype(np.float32))
+            print(f'From Disk: {vol.shape} ({vol.dtype})')
+            if vol.size(3) < vol.size(0): vol = vol.permute(3, 0,1,2)
+            if vol.size(0) == 4:
+                print('Discarding alpha channel')
+                vol = vol[:3] # TODO: only for RGBA!!!!
             print(f'Loaded volume: {vol.shape} of type {vol.dtype}.')
             assert vol.ndim == 4
         else:
@@ -217,19 +222,21 @@ if __name__ == '__main__':
         feat_res = tuple(map(lambda d: int(d // args.feature_downsize_factor), vol.shape[-3:]))
         if args.slice_along in ['x', 'y', 'z']:
             for vol_in in volume_list:
+                print(f'Volume In: {vol_in.shape}')
                 for k,v in compute_qkv(vol_in, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ).items():
-                    qkv[k] += (F.interpolate(make_5d(v).float(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / len(volume_list)).half()
+                    qkv[k] += (F.interpolate(make_5d(v).cuda(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / len(volume_list)).cpu()
         elif args.slice_along == 'all':
             for ax in ['x', 'y', 'z']:
                 for vol_in in volume_list:
+                    print(f'Running {vol_in.shape} along {ax}')
                     for k,v in compute_qkv(vol_in, batch_size=args.batch_size, slice_along=ax, dev=dev, typ=typ).items():
-                        qkv[k] += (F.interpolate(make_5d(v).float(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / (3.0 * len(volume_list))).half()
+                        qkv[k] += (F.interpolate(make_5d(v).cuda(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / (3.0 * len(volume_list))).cpu()
         else:
             raise Exception(f'Invalid argument for --slice-along: {args.slice_along}. Must be x,y,z or all')
         print(f'Computed qkv, saving now to: {cache_path}')
         if cache_path.suffix in ['.pt', '.pth']:
-            torch.save(qkv, cache_path)
+            torch.save({k: v for k,v in qkv.items()}, cache_path)
         elif cache_path.suffix == '.npy':
             np.save(cache_path, {k: v.numpy() for k,v in qkv.items()})
-    
+
     sys.exit(0)
