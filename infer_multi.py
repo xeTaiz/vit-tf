@@ -219,7 +219,8 @@ if __name__ == '__main__':
             volume_list = [vol[[i]].expand(3,-1,-1,-1) for i in range(vol.size(0))]
         # Initialize features
         qkv = {'q': 0, 'k': 0, 'v': 0}
-        feat_res = tuple(map(lambda d: int(d // args.feature_downsize_factor), vol.shape[-3:]))
+        feat_res = tuple(map(lambda d: int(d[0] // d[1]), zip(vol.shape[-3:], (args.feature_downsize_factor, args.feature_downsize_factor, args.feature_downsize_factor*3.0))))
+        print(f"Output feature resolution: {feat_res}")
         if args.slice_along in ['x', 'y', 'z']:
             for vol_in in volume_list:
                 print(f'Volume In: {vol_in.shape}')
