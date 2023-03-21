@@ -23,7 +23,7 @@ if __name__ == '__main__':
 
     array = np.fromfile(raw_file, dtype=np.uint8, count=512*512*1873*4)
     vol = torch.from_numpy(array.reshape(1873,512,512,4)).permute(3,2,1,0)
-    vol = F.interpolate(vol[None], (512,512,468), mode='nearest').squeeze(0)
+    # vol = F.interpolate(vol[None], (512,512,468), mode='nearest').squeeze(0)
 
     print(f'Saving volume to {out_path}')
     print(vol.shape, vol.dtype, vol.min(), vol.max())
