@@ -166,7 +166,11 @@ if __name__ == '__main__':
     parser.add_argument('--cache-path', type=str, required=True, help='Path to save computed qkv features to.')
     parser.add_argument('--dino-model', type=str, choices=dino_archs, default='vits8', help='DINO model to use')
     parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
+    parser.add_argument('--attention-features', type=str, choices=['q', 'k', 'v'], default='k', help='Which of the attention feautres to use, q,k or v')
     parser.add_argument('--batch-size', type=int, default=1, help='Feed volume through network in batches')
+    parser.add_argument('--rgb', action='store_true', default=False, help='Treat input volume as RGB (assumes >3 channel, only uses first 3), else process each channel separately')
+    parser.add_argument('--norm-before-reduce', action='store_true', default=False, help='Normalizes the feature vectors before applying channel reduction')
+    parser.add_argument('--channel-reduction', type=str, choices=['add', 'mean', 'stack'], help='How to reduce the resulting feature volumes')
     parser.add_argument('--feature-downsize-factor', type=int, default=4, help='Rescales the feature map to input volume extent // this factor. With a ViTs8 this needs to be 8 to prevent upscaling of feature maps. Only if --slice-along ALL')
     args = parser.parse_args()
 
@@ -201,9 +205,6 @@ if __name__ == '__main__':
                 vol = torch.from_numpy(data.astype(np.float32))
             print(f'From Disk: {vol.shape} ({vol.dtype})')
             if vol.size(3) < vol.size(0): vol = vol.permute(3, 0,1,2)
-            if vol.size(0) == 4:
-                print('Discarding alpha channel')
-                vol = vol[:3] # TODO: only for RGBA!!!!
             print(f'Loaded volume: {vol.shape} of type {vol.dtype}.')
             assert vol.ndim == 4
         else:
@@ -211,33 +212,37 @@ if __name__ == '__main__':
         # Make inputs 3 channel volumes
         if vol.size(0) == 1:
             volume_list = [vol.expand(3,-1,-1,-1)]
-        elif vol.size(0) == 2:
-            volume_list = [torch.cat([vol, vol.mean(dim=0).unsqueeze(0)], dim=0)]
-        elif vol.size(0) == 3:
-            volume_list = [vol]
-        elif vol.size(0) > 3:
-            volume_list = [vol[[i]].expand(3,-1,-1,-1) for i in range(vol.size(0))]
-        # Initialize features
-        qkv = {'q': 0, 'k': 0, 'v': 0}
-        feat_res = tuple(map(lambda d: int(d[0] // d[1]), zip(vol.shape[-3:], (args.feature_downsize_factor, args.feature_downsize_factor, args.feature_downsize_factor*3.0))))
-        print(f"Output feature resolution: {feat_res}")
-        if args.slice_along in ['x', 'y', 'z']:
-            for vol_in in volume_list:
-                print(f'Volume In: {vol_in.shape}')
-                for k,v in compute_qkv(vol_in, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ).items():
-                    qkv[k] += (F.interpolate(make_5d(v).cuda(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / len(volume_list)).cpu()
-        elif args.slice_along == 'all':
-            for ax in ['x', 'y', 'z']:
-                for vol_in in volume_list:
-                    print(f'Running {vol_in.shape} along {ax}')
-                    for k,v in compute_qkv(vol_in, batch_size=args.batch_size, slice_along=ax, dev=dev, typ=typ).items():
-                        qkv[k] += (F.interpolate(make_5d(v).cuda(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / (3.0 * len(volume_list))).cpu()
+        elif vol.size(0) >= 3 and args.rgb:
+            volume_list = [vol[:3]]
         else:
-            raise Exception(f'Invalid argument for --slice-along: {args.slice_along}. Must be x,y,z or all')
-        print(f'Computed qkv, saving now to: {cache_path}')
+            volume_list = [vol[[i]].expand(3,-1,-1,-1) for i in range(vol.size(0))] # Feed separately
+        # Initialize features
+        features = [0.0 for _ in range(len(volume_list))]
+        feat_res = tuple(map(lambda d: int(d[0] // d[1]), zip(vol.shape[-3:], (args.feature_downsize_factor, args.feature_downsize_factor, args.feature_downsize_factor))))
+        print(f"Output feature resolution: {feat_res}")
+
+        for i, vol_in in enumerate(volume_list):
+            for ax in ['x', 'y', 'z'] if args.slice_along == 'all' else [args.slice_along]:
+                print(f'Running {vol_in.shape} along {ax}')
+                qkv = compute_qkv(vol_in, batch_size=args.batch_size, slice_along=ax, dev=dev, typ=typ)                                                  # x,y,z are 1.0, all is 3.0
+                features[i] += (F.interpolate(make_5d(qkv[args.attention_features]).cuda(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / float(len(args.slice_along))).cpu()
+        del qkv
+        # Reduce over different volume channels
+        features = torch.stack(features, dim=0)
+        if args.norm_before_reduce:
+            features = F.normalize(features.float(), dim=1).half()
+
+        if args.channel_reduction == 'add':
+            features = features.sum(dim=0)
+        elif args.channel_reduction == 'mean':
+            features = features.mean(dim=0)
+        elif args.channel_reduction == 'stack':
+            pass
+
+        print(f'Computed qkv, now saving {args.attention_features} to: {cache_path}')
         if cache_path.suffix in ['.pt', '.pth']:
-            torch.save({k: v for k,v in qkv.items()}, cache_path)
+            torch.save(features, cache_path)
         elif cache_path.suffix == '.npy':
-            np.save(cache_path, {k: v.numpy() for k,v in qkv.items()})
+            np.save(cache_path, features.numpy())
 
     sys.exit(0)
