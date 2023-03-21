@@ -8,7 +8,7 @@ def make_nd(t, n):
     '''  Prepends singleton dimensions to `t` until n-dimensional '''
     if n < t.ndim:
         raise Exception(f'make_nd cannot reduce cardinality. Your Tensor.ndim={t.ndim} > n={n}.')
-    elif n == t.ndim: 
+    elif n == t.ndim:
         return t
     else:
         nons = [None]*(n-t.ndim)
@@ -39,48 +39,59 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
     '''Samples features at given coords from `feat_vol` by interpolating the feature maps in all dimensions. This should result in nearest interpolation along the un-reduced dimension
 
     Args:
-        feat_vol (Tensor): Shape (F, W, H, D)
-        rel_coords (Tensor): Shape (C, A, 3)
+        feat_vol (Tensor): Shape ([M,] F, W, H, D), M being modality of the feature map
+        rel_coords (Tensor): Shape ([M,] C, A, 3)
         mode (str): Interpolation along 3D volume. One of: nearest, bilinear
 
     Returns:
-        Tensor: Shape (C, A, F)
+        Tensor: Shape ([M,] C, A, F)
 
     '''
     # Flip dims to get X,Y,Z -> Z,Y,X
-    grid_idx = make_5d(rel_coords.flip(dims=(-1,))).to(feat_vol.dtype).to(feat_vol.device) # (1, 1, C, A, 3)
+    if feat_vol.ndim == 4: feat_vol.unsqueeze_(0)     # Ensure 5D
+    if rel_coords.ndim == 3: rel_coords.unsqueeze_(0) # Ensure 4D
+    if rel_coords.size(0) != feat_vol.size(0):        # Expand M dimension to feat_vol's
+        rel_coords = rel_coords.expand(feat_vol.size(0),-1,-1,-1)
+    rel_coords.unsqueeze_(-2) # Make 5D
+    grid_idx = rel_coords.flip(dims=(-1,)).to(feat_vol.dtype).to(feat_vol.device) # (1, 1, C, A, 3)
+    print('grid_idx', grid_idx.shape)
     feats = F.grid_sample(make_5d(feat_vol), grid_idx, mode=mode, align_corners=False)
-    return feats.squeeze(0).squeeze(1).permute(1,2,0).contiguous()
+    print('feats', feats.shape)
+    # (M, F, C*A, K, 1) -> (M, C, A, F)
+    return feats.squeeze(-1).permute(0,2,3,1).contiguous()
 
 def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0, feature_sampling_mode='nearest'):
     ''' Re-samples the feature volume at the `K` most similar locations.
-    
+
     Args:
-        feat_vol (Tensor): (Normalized) Feature Volume. Shape (F, W, H, D)
-        sims (Tensor): Similarity Volume for classes C with A annotations. Shape (C, A, W, H, D)
+        feat_vol (Tensor): (Normalized) Feature Volume. Shape ([M,] F, W, H, D)
+        sims (Tensor): Similarity Volume for classes C with A annotations. Shape ([M,] C, A, W, H, D)
         K (int): Number of new samples to draw per annotation (and per class)
         similarity_exponent (float): Exponent to sharpen similarity maps (sim ** exponent)
         feature_sampling_mode (str): PyTorch grid_sample interpolation mode for sampling features
 
     Returns:
-        Tensor: Similarity Volume of shape (C, A, W, H, D)
+        Tensor: Similarity Volume of shape ([M,] C, A, W, H, D)
     '''
-    if K > 4: 
+    if sims.ndim == 5: sims.unsqueeze_(0) # add empty M dimension
+    if K > 4:
         dev, typ = torch.device('cpu'), torch.float32
     else:
         dev, typ = feat_vol.device, feat_vol.dtype
     top_ks = []
-    for s in sims.reshape(-1, sims.size(2), sims.size(3), sims.size(4)):
+    for s in sims.reshape(-1, *sims.shape[-3:]):
         top_idxs = torch.topk(s.flatten(), K, largest=True, sorted=True).values[-1]
         top_idxs_nd = (s >= top_idxs).nonzero()[:K]
         top_ks.append(top_idxs_nd)
-    top_ks = torch.stack(top_ks).reshape(*sims.shape[:2], K, 3)
-    rel_top_ks = (top_ks.float() + 0.5) / torch.tensor([[[sims.shape[-3:]]]], device=top_ks.device) * 2.0 - 1.0
-    c, a, k, _ = top_ks.shape
-    qf2 = sample_features3d(feat_vol, rel_top_ks.view(c, a*k, 3), mode=feature_sampling_mode)
-    qf2 = qf2.reshape(c, a, k, qf2.size(-1))
-    sims = torch.einsum('fwhd,cakf->cakwhd', (feat_vol.to(dev).to(typ), qf2.to(dev).to(typ))).clamp(0, 1) ** similarity_exponent
-    return sims.mean(dim=2).to(feat_vol.dtype).to(feat_vol.device)
+    top_ks = torch.stack(top_ks).reshape(*sims.shape[:-3], K, 3)
+    rel_top_ks = (top_ks.float() + 0.5) / torch.tensor([[[[sims.shape[-3:]]]]], device=top_ks.device) * 2.0 - 1.0
+    m, c, a, k, _ = top_ks.shape
+    qf2 = sample_features3d(feat_vol, rel_top_ks.view(m, c, a*k, 3), mode=feature_sampling_mode)
+    qf2 = qf2.reshape(m, c, a, k, qf2.size(-1))
+    print('resample_topk() qf2:', qf2.shape)
+    sims = torch.einsum('mfwhd,mcakf->mcakwhd', (feat_vol.to(dev).to(typ), qf2.to(dev).to(typ))).clamp(0, 1) ** similarity_exponent
+    print('resample_topk() sims:', sims.shape)
+    return sims.mean(dim=3).to(feat_vol.dtype).to(feat_vol.device)
 
 def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ=torch.float32):
     patch_size = 8
@@ -219,5 +230,5 @@ if __name__ == '__main__':
             torch.save(qkv, cache_path)
         elif cache_path.suffix == '.npy':
             np.save(cache_path, {k: v.numpy() for k,v in qkv.items()})
-    
+
     sys.exit(0)
