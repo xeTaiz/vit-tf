@@ -17,6 +17,7 @@ from contextlib import contextmanager
 
 from scipy.sparse import csr_matrix, diags
 from scipy.sparse.linalg import cg
+from scipy.ndimage import grey_closing, grey_opening
 
 ######### Bilateral Solver
 
@@ -220,8 +221,8 @@ def apply_bilateral_solver3d(t: torch.Tensor, r: torch.Tensor, c: torch.Tensor =
     out = solver.solve(t, c).reshape(*shap)
     return torch.from_numpy(out).to(torch.float32).squeeze()
 
-def _reduce_max(acc, up, N): return torch.maximum(acc, up.max(dim=0))
-def _reduce_avg(acc, up, N): return (acc * N + up.sum(dim=0)) / (N + up.size(0))
+def _reduce_max(acc, up, N): return torch.maximum(acc, up.max(dim=1).values)
+def _reduce_avg(acc, up, N): return (acc * N + up.sum(dim=1)) / (N + up.size(1))
 
 reduce_fns = {
     'max': _reduce_max,
@@ -310,31 +311,37 @@ class DinoSimilarities(ivw.Processor):
         # Properties    TODO: set cleanupTemporaryVolume default to True
         self.dinoProcessorIdentifier = ivw.properties.StringProperty("dinoProcId", "DINO Volume Renderer ID", "DINOVolumeRenderer")
         self.volumeInputSelectorIdentifier = ivw.properties.StringProperty("volInSelectorId", "Volume Input Selector ID", "VolumeInputSelector")
+        self.cachePathOverride = ivw.properties.FileProperty("cahcePathOverride", "Override Cache Path", "")
         self.useCuda = ivw.properties.BoolProperty("useCuda", "Use CUDA", False)
         self.cleanupTemporaryVolume = ivw.properties.BoolProperty("cleanupTempVol", "Clean up volume that's temporarily created on disk to pass to infer.py", True)
         self.similarityVolumeScalingFactor = ivw.properties.FloatProperty("simScaleFact", "Similarity Volume Downscale Factor", 4.0, 1.0, 8.0)
         self.similarityVolumeScalingFactor.invalidationLevel = ivw.properties.InvalidationLevel.Valid
         # self.runWithScaling = ivw.properties.ButtonProperty("runWithScaling", "Run with scaling")
         self.updatePorts = ivw.properties.ButtonProperty("updateEverything", "Update Callbacks, Ports & Connections", self.updateCallbacksPortsAndConnections)
+        self.clearSimilarityCache = ivw.properties.ButtonProperty("clearSimn", "Clear Similarity Cache", self.clearSimilarity)
         self.sliceAlong = ivw.properties.OptionPropertyString("sliceAlong", "DINO Slice along Axis", [
             ivw.properties.StringOption("alongALL", 'Slice along ALL', 'all'),
             ivw.properties.StringOption("alongX", 'Slice along X', 'x'),
             ivw.properties.StringOption("alongY", 'Slice along Y', 'y'),
             ivw.properties.StringOption("alongZ", 'Slice along Z', 'z')
         ])
-        self.sigmaSpatial = ivw.properties.IntProperty("blSigmaSpatial", "BL: Sigma Spatial", 5, 1, 32)
+        self.sigmaSpatial = ivw.properties.IntProperty("blSigmaSpatial", "BL: Sigma Spatial", 3, 1, 32)
         self.sigmaChroma = ivw.properties.IntProperty("blSigmaChroma", "BL: SigmaChroma", 5, 1, 16)
         self.sigmaLuma = ivw.properties.IntProperty("blSigmaLuma", "BL: SigmaLumal", 5, 1, 16)
+        self.openCloseIterations = ivw.properties.IntProperty("openCloseIterations", "Open-Close Iterations", 1, 0, 8)
         self.addProperty(self.dinoProcessorIdentifier)
         self.addProperty(self.volumeInputSelectorIdentifier)
+        self.addProperty(self.cachePathOverride)
         self.addProperty(self.useCuda)
         self.addProperty(self.cleanupTemporaryVolume)
         self.addProperty(self.similarityVolumeScalingFactor)
         self.addProperty(self.updatePorts)
+        self.addProperty(self.clearSimilarityCache)
         self.addProperty(self.sliceAlong)
         self.addProperty(self.sigmaSpatial)
         self.addProperty(self.sigmaChroma)
         self.addProperty(self.sigmaLuma)
+        self.addProperty(self.openCloseIterations)
         # Callbacks
         self.inport.onChange(self.getVolumeDataPath)
         self.useCuda.onChange(self.updateFeatvolDevice)
@@ -369,10 +376,14 @@ class DinoSimilarities(ivw.Processor):
     def getVolumeDataPath(self):
         print('getVolumeDataPath()')
         if self.inport.isConnected():
-            data_path = Path(self.inport.getConnectedOutport().processor.properties['filename'].value)
-            print(f'New volume data connected: {data_path}')
-            clean_name = data_path.stem.replace(" ", "").replace("(", "").replace(")", "").replace("[", "").replace("]", "")
-            self.cache_path = data_path.parent/f'{clean_name}_DINOfeats_{self.sliceAlong.selectedValue}.npy'
+            print(self.inport.getConnectedOutport().processor.properties)
+            if self.cachePathOverride.value != '' and Path(self.cachePathOverride.value).exists():
+                self.cache_path = Path(self.cachePathOverride.value)
+            else:
+                data_path = Path(self.inport.getConnectedOutport().processor.properties['filename'].value)
+                print(f'New volume data connected: {data_path}')
+                clean_name = data_path.stem.replace(" ", "").replace("(", "").replace(")", "").replace("[", "").replace("]", "")
+                self.cache_path = data_path.parent/f'{clean_name}_DINOfeats_{self.sliceAlong.selectedValue}.npy'
             self.initializeResources()
         else:
             self.cache_path = None
@@ -472,10 +483,10 @@ class DinoSimilarities(ivw.Processor):
                 feat_vol = torch.from_numpy(data)
         else:
             raise Exception(f'Unsupported file extension: {cache_path.suffix}')
-        assert feat_vol.ndim == 4
+        if feat_vol.ndim == 4: feat_vol.unsqueeze_(0) # add empty M dimension -> (M, F, W, H, D)
         dev = torch.device("cuda" if torch.cuda.is_available and self.useCuda.value else "cpu")
         typ = torch.float16 if dev == torch.device("cuda") else torch.float32
-        self.feat_vol = F.normalize(feat_vol.to(typ).to(dev), dim=0)
+        self.feat_vol = F.normalize(feat_vol.to(typ).to(dev), dim=1)
         log('Loaded self.feat_vol', self.feat_vol)
 
     def computeSimilarities(self, annotations):
@@ -491,27 +502,32 @@ class DinoSimilarities(ivw.Processor):
         with torch.no_grad():
             dev, typ = self.feat_vol.device, self.feat_vol.dtype
             simparams = get_similarity_params(self.dinoProcessorIdentifier.value)
+            in_vol = np.ascontiguousarray(self.inport.getData().data).astype(np.float32)
+            in_dims = tuple(in_vol.shape[:3])
+            if in_vol.ndim == 4: in_vol = np.transpose(in_vol, (3,0,1,2))
+            sim_shape = tuple(map(lambda d: int(d // self.similarityVolumeScalingFactor.value), in_dims))
+            vol_extent = torch.tensor([[[*in_dims]]], device=dev, dtype=typ)
+            vol = F.interpolate(make_5d(torch.from_numpy(in_vol.copy())), sim_shape, mode='nearest').squeeze(0)
+            vol = (255.0 * norm_minmax(vol)).to(torch.uint8)
+            if   vol.size(0) == 1: vol = vol[None].expand(1,3,-1,-1,-1)
+            elif vol.size(0) == 2: vol = vol[:,None].expand(-1,3,-1,-1,-1)
+            elif vol.size(0) == 3: vol = vol[None]
+            elif vol.size(0)  > 3: vol = vol[None, :3]
             def split_into_classes(t):
                 sims = {}
                 idx = 0
                 for k,v in annotations.items():
-                    sims[k] = t[idx:idx+v.size(0)]
+                    sims[k] = t[:, idx:idx+v.size(0)]
                     idx += v.size(0)
                 return sims
             if len(annotations) == 0: return  # No NTFs
             abs_coords = torch.cat(list(annotations.values())).to(dev).to(typ)
             if abs_coords.numel() == 0: return # No annotation in any of the NTFs
-            in_vol = np.ascontiguousarray(self.inport.getData().data).astype(np.float32)
-            in_dims = tuple(in_vol.shape[:3])
-            vol_extent = torch.tensor([[[*in_dims]]], device=dev, dtype=typ)
             rel_coords = (abs_coords.float() + 0.5) / vol_extent * 2.0 - 1.0
-            sim_shape = tuple(map(lambda d: int(d // self.similarityVolumeScalingFactor.value), in_dims))
-            vol = F.interpolate(make_5d(torch.from_numpy(in_vol.copy())), sim_shape, mode='nearest').squeeze(0)
-            vol = (255.0 * norm_minmax(vol)).to(torch.uint8)
 
             qf = sample_features3d(self.feat_vol, rel_coords, mode='bilinear')
-            sims = torch.einsum('fwhd,caf->cawhd', (self.feat_vol, qf))
-            sims = resample_topk(self.feat_vol, sims, K=8, feature_sampling_mode='bilinear').squeeze(0)
+            sims = torch.einsum('mfwhd,mcaf->mcawhd', (self.feat_vol, qf))
+            sims = resample_topk(self.feat_vol, sims, K=8, feature_sampling_mode='bilinear').squeeze(1)
 
             bls_scale = self.similarityVolumeScalingFactor.value / 4.0
             bls_params = { # Values for scaling factor //4.0
@@ -528,15 +544,17 @@ class DinoSimilarities(ivw.Processor):
                 if k in self.raw_sims.keys():
                     log(f'self.raw_sims[{k}]', self.raw_sims[k])
                 log('sim', sim)
-                sim = simparams[k]['reduction'](self.raw_sims[k] if k in self.raw_sims.keys() else 0, sim, len(self.annotation_ids[k]))
+                sim = simparams[k]['reduction'](self.raw_sims[k] if k in self.raw_sims.keys() else torch.zeros(1, dtype=typ, device=dev), sim, len(self.annotation_ids[k]))
                 log('sim', sim)
                 self.raw_sims[k] = sim
                 if tuple(sim.shape[-3:]) != sim_shape:
                     print(f'Resizing {k} similarity to', sim_shape)
                     sim = F.interpolate(make_5d(sim), sim_shape, mode='nearest').squeeze(0)
                 # Apply Bilateral Solver
-                blsim = apply_bilateral_solver3d(make_4d(sim), vol.expand(3,-1,-1,-1), grid_params=bls_params)
-                sim_split[k] = (255.0 / blsim.quantile(q=0.999) * blsim).clamp(0, 255.0).cpu().to(torch.uint8).squeeze()
+                blsim = torch.zeros(1, dtype=typ, device=dev)
+                for ssim, svol in zip(sim, vol):
+                    blsim = torch.maximum(blsim, apply_bilateral_solver3d(make_4d(ssim), svol, grid_params=bls_params))
+                sim_split[k] = (255.0 / blsim.quantile(q=0.9999) * blsim).clamp(0, 255.0).cpu().to(torch.uint8).squeeze()
                 # log(k, sim_split[k])
             return sim_split
 
@@ -559,7 +577,13 @@ class DinoSimilarities(ivw.Processor):
         if len(annotations_to_compute) > 0:
             self.similarities.update(self.computeSimilarities(annotations_to_compute))
         self.annotation_ids.update(annotation_ids) # Do later in code when computation is done
+        return annotations_to_compute.keys()
 
+    def clearSimilarity(self):
+        self.annotation_ids.clear()
+        self.similarities.clear()
+        self.raw_sims.clear()
+        self.invalidateOutput()
 
     def initializeResources(self):
         print('initializeResources()')
@@ -601,13 +625,18 @@ class DinoSimilarities(ivw.Processor):
                 print(set(get_similarity_params(self.dinoProcessorIdentifier.value, return_empty=False).keys()))
                 print()
                 self.connectVolumeOutports()
-            self.updateSimilarities() # Compute similarity maps
+            ports_to_update = self.updateSimilarities() # Compute similarity maps
             if len(self.similarities) == 0:
                 print('Could not compute self.similarities. Did you annotate anything?')
+            # elif len(ports_to_update) == 0:
+            #     print('No ports to update.')
             else: # Output similarity volumes through volume outports
                 in_vol = self.inport.getData() # ivw.Volume
-                for k,v in self.similarities.items():
-                    volume = ivw.data.Volume(np.asfortranarray(v.numpy()))
+                for k in self.outs.keys():
+                    sim_np = self.similarities[k].numpy()
+                    for _ in range(self.openCloseIterations.value):
+                        sim_np = grey_closing(grey_opening(sim_np, (3,3,3)), (3,3,3))
+                    volume = ivw.data.Volume(np.asfortranarray(sim_np))
                     volume.modelMatrix = in_vol.modelMatrix
                     volume.worldMatrix = in_vol.worldMatrix
                     volume.dataMap.dataRange = ivw.glm.dvec2(0.0, 255.0)
