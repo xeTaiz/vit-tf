@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 import sys
 from collections import defaultdict
+from itertools import count
 from pathlib import Path
 NTF_REPO = '/home/dome/Dev/ntf'
 sys.path.append(NTF_REPO)
@@ -288,7 +289,9 @@ def get_similarity_params(proc_name, return_empty=False):
         ntf.identifier: {
             'exponent': ntf.properties['simexponent'].value,
             'threshold': ntf.properties['simthresh'].value,
-            'reduction': reduce_fns[ntf.properties['simreduction'].value]
+            'reduction': reduce_fns[ntf.properties['simreduction'].value],
+            'modality': ntf.properties['modality'].value,
+            'modalityWeight': ntf.properties['modalityWeight'].value.array
         } for ntf in dino_proc.tfs.properties if len(ntf.annotations.properties) > THRESH
     }
 
@@ -551,9 +554,9 @@ class DinoSimilarities(ivw.Processor):
                     print(f'Resizing {k} similarity to', sim_shape)
                     sim = F.interpolate(make_5d(sim), sim_shape, mode='nearest').squeeze(0)
                 # Apply Bilateral Solver
-                blsim = torch.zeros(1, dtype=typ, device=dev)
-                for ssim, svol in zip(sim, vol):
-                    blsim = torch.maximum(blsim, apply_bilateral_solver3d(make_4d(ssim), svol, grid_params=bls_params))
+                blsim = 0.0
+                for i, ssim, svol in zip(count(), sim, vol):
+                    blsim += apply_bilateral_solver3d(make_4d(ssim), svol, grid_params=bls_params) * simparams[k]['modalityWeight'][i]
                 sim_split[k] = (255.0 / blsim.quantile(q=0.9999) * blsim).clamp(0, 255.0).cpu().to(torch.uint8).squeeze()
                 # log(k, sim_split[k])
             return sim_split
