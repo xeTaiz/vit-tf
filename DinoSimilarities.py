@@ -8,8 +8,16 @@ import sys
 from collections import defaultdict
 from itertools import count
 from pathlib import Path
-NTF_REPO = '/home/dome/Dev/ntf'
-sys.path.append(NTF_REPO)
+NTF_REPO_HOME = '/home/dome/Dev/ntf'
+NTF_REPO_UNI = '/home/dome/Repositories/neural-tf-design'
+if Path(NTF_REPO_HOME).exists():
+    NTF_REPO = NTF_REPO_HOME
+    sys.path.append(NTF_REPO)
+elif Path(NTF_REPO_UNI).exists():
+    NTF_REPO = NTF_REPO_UNI
+    sys.path.append(NTF_REPO_UNI)
+else:
+    raise Exception('No NTF repo found')
 from infer import sample_features3d, resample_topk, make_4d, make_5d, norm_minmax
 # from bilateral_solver3d import apply_bilateral_solver3d
 import os
