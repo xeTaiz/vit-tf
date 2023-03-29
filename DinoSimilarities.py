@@ -299,7 +299,7 @@ def get_similarity_params(proc_name, return_empty=False):
             'threshold': ntf.properties['simthresh'].value,
             'reduction': reduce_fns[ntf.properties['simreduction'].value],
             'modality': ntf.properties['modality'].value,
-            'modalityWeight': ntf.properties['modalityWeight'].value.array
+            'modalityWeight': torch.from_numpy(ntf.properties['modalityWeight'].value.array)
         } for ntf in dino_proc.tfs.properties if len(ntf.annotations.properties) > THRESH
     }
 
@@ -327,6 +327,10 @@ class DinoSimilarities(ivw.Processor):
         self.cleanupTemporaryVolume = ivw.properties.BoolProperty("cleanupTempVol", "Clean up volume that's temporarily created on disk to pass to infer.py", True)
         self.similarityVolumeScalingFactor = ivw.properties.FloatProperty("simScaleFact", "Similarity Volume Downscale Factor", 4.0, 1.0, 8.0)
         self.similarityVolumeScalingFactor.invalidationLevel = ivw.properties.InvalidationLevel.Valid
+        self.modalityWeightingMode = ivw.properties.OptionPropertyString("modalityWeightingMode", "Modality Weighting Mode", [
+            ivw.properties.StringOption("similarities", "Similarities", "sims"),
+            ivw.properties.StringOption("concat", "Concat Features", "concat")
+        ])
         # self.runWithScaling = ivw.properties.ButtonProperty("runWithScaling", "Run with scaling")
         self.updatePorts = ivw.properties.ButtonProperty("updateEverything", "Update Callbacks, Ports & Connections", self.updateCallbacksPortsAndConnections)
         self.clearSimilarityCache = ivw.properties.ButtonProperty("clearSimn", "Clear Similarity Cache", self.clearSimilarity)
@@ -346,6 +350,7 @@ class DinoSimilarities(ivw.Processor):
         self.addProperty(self.useCuda)
         self.addProperty(self.cleanupTemporaryVolume)
         self.addProperty(self.similarityVolumeScalingFactor)
+        self.addProperty(self.modalityWeightingMode)
         self.addProperty(self.updatePorts)
         self.addProperty(self.clearSimilarityCache)
         self.addProperty(self.sliceAlong)
@@ -519,6 +524,7 @@ class DinoSimilarities(ivw.Processor):
             sim_shape = tuple(map(lambda d: int(d // self.similarityVolumeScalingFactor.value), in_dims))
             vol_extent = torch.tensor([[[*in_dims]]], device=dev, dtype=typ)
             vol = F.interpolate(make_5d(torch.from_numpy(in_vol.copy())), sim_shape, mode='nearest').squeeze(0)
+            m = vol.size(0)
             vol = (255.0 * norm_minmax(vol)).to(torch.uint8)
             if   vol.size(0) == 1: vol = vol[None].expand(1,3,-1,-1,-1)
             elif vol.size(0) == 2: vol = vol[:,None].expand(-1,3,-1,-1,-1)
@@ -536,7 +542,29 @@ class DinoSimilarities(ivw.Processor):
             if abs_coords.numel() == 0: return # No annotation in any of the NTFs
             rel_coords = (abs_coords.float() + 0.5) / vol_extent * 2.0 - 1.0
 
+            if self.modalityWeightingMode.value == 'concat' and self.feat_vol.ndim == 5 and self.feat_vol.size(0) > 1:
+                def weight_features(f):
+                    idx = 0
+                    for k,v in annotations.items():
+                        print(simparams[k]['modality'])
+                        print(simparams[k]['modalityWeight'])
+                        for fs, mw in zip(f.split(384, dim=-1), simparams[k]['modalityWeight']):
+                            fs[:,:,idx:idx+v.size(0)] *= mw
+                        idx += v.size(0)
+                    return F.normalize(f, dim=-1)
+                def weight_featvol(f, k):
+                    return torch.cat([fs * simparams[k]['modalityWeight'] for fs in f.split(384, dim=1)], dim=1)
+                log('self.feat_vol', self.feat_vol)
+                # self.feat_vol = torch.cat([self.feat_vol[[i]] for i in zip(range(self.feat_vol.size(0)), simparams)], dim=1)
+                # log('self.feat_vol', self.feat_vol)
+                # TEST
+                mw = torch.cat([simparams[k]['modalityWeight'][:m].expand(v.size(0), m) for k,v in annotations.items()])
+                mw = mw.repeat_interleave(384, dim=1)
+                log('mw', mw)
+                #---
             qf = sample_features3d(self.feat_vol, rel_coords, mode='bilinear')
+
+            log('qf', qf)
             sims = torch.einsum('mfwhd,mcaf->mcawhd', (self.feat_vol, qf))
             sims = resample_topk(self.feat_vol, sims, K=8, feature_sampling_mode='bilinear').squeeze(1)
 
