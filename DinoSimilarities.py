@@ -325,6 +325,7 @@ class DinoSimilarities(ivw.Processor):
         self.cachePathOverride = ivw.properties.FileProperty("cahcePathOverride", "Override Cache Path", "")
         self.useCuda = ivw.properties.BoolProperty("useCuda", "Use CUDA", False)
         self.cleanupTemporaryVolume = ivw.properties.BoolProperty("cleanupTempVol", "Clean up volume that's temporarily created on disk to pass to infer.py", True)
+        self.updateOnAnnotation = ivw.properties.BoolProperty("updateOnAnnotation", "Update Similarities on Annotation", True)
         self.similarityVolumeScalingFactor = ivw.properties.FloatProperty("simScaleFact", "Similarity Volume Downscale Factor", 4.0, 1.0, 8.0)
         self.similarityVolumeScalingFactor.invalidationLevel = ivw.properties.InvalidationLevel.Valid
         self.modalityWeightingMode = ivw.properties.OptionPropertyString("modalityWeightingMode", "Modality Weighting Mode", [
@@ -349,6 +350,7 @@ class DinoSimilarities(ivw.Processor):
         self.addProperty(self.cachePathOverride)
         self.addProperty(self.useCuda)
         self.addProperty(self.cleanupTemporaryVolume)
+        self.addProperty(self.updateOnAnnotation)
         self.addProperty(self.similarityVolumeScalingFactor)
         self.addProperty(self.modalityWeightingMode)
         self.addProperty(self.updatePorts)
@@ -435,9 +437,10 @@ class DinoSimilarities(ivw.Processor):
                     cb = tfProp.onChange(self.invalidateOutput)
                     self.registeredCallbacks[tfProp.path] = cb
 
-    def invalidateOutput(self):
-        print('Invalidating Output!')
-        self.invalidate(ivw.properties.InvalidationLevel.InvalidOutput)
+    def invalidateOutput(self, force=False):
+        if force or self.updateOnAnnotation.value:
+            print('Invalidating Output!')
+            self.invalidate(ivw.properties.InvalidationLevel.InvalidOutput)
 
     def addAndConnectOutports(self):
         self.addVolumeOutports()
@@ -622,7 +625,7 @@ class DinoSimilarities(ivw.Processor):
         self.annotation_ids.clear()
         self.similarities.clear()
         self.raw_sims.clear()
-        self.invalidateOutput()
+        self.invalidateOutput(force=True)
 
     def initializeResources(self):
         print('initializeResources()')
