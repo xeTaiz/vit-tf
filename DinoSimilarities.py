@@ -641,7 +641,12 @@ class DinoSimilarities(ivw.Processor):
                 tmpvol_path = str(self.cache_path.parent/'tmpvol.npy')
                 np.save(tmpvol_path, np.ascontiguousarray(vol_np))
                 # Run infer.py script to produce feat_vol cache
-                cmd = f'{sys.executable} {NTF_REPO}/infer.py --data-path "{tmpvol_path}" --cache-path "{self.cache_path}" --slice-along {self.sliceAlong.selectedValue}'
+                if vol_np.ndim == 3:
+                    cmd = f'{sys.executable} {NTF_REPO}/infer.py --data-path "{tmpvol_path}" --cache-path "{self.cache_path}" --slice-along {self.sliceAlong.selectedValue}'
+                elif vol_np.ndim == 4:
+                    cmd = f'{sys.executable} {NTF_REPO}/infer_multi.py --data-path "{tmpvol_path}" --cache-path "{self.cache_path}" --slice-along {self.sliceAlong.selectedValue}'
+                else:
+                    raise Exception(f'Invalid volume dimension: {vol_np.shape} is neither 3D nor 4D')
                 print(f'Running command: {cmd}')
                 comp = subprocess.run(cmd, encoding='UTF-8', shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 if comp.returncode == 0: # infer.py was successful, load cache
