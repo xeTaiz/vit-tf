@@ -319,9 +319,8 @@ class DinoSimilarities(ivw.Processor):
         # Ports
         self.inport = ivw.data.VolumeInport("inport")
         self.addInport(self.inport, owner=False)
-        # Properties    TODO: set cleanupTemporaryVolume default to True
+        # Properties
         self.dinoProcessorIdentifier = ivw.properties.StringProperty("dinoProcId", "DINO Volume Renderer ID", "DINOVolumeRenderer")
-        self.volumeInputSelectorIdentifier = ivw.properties.StringProperty("volInSelectorId", "Volume Input Selector ID", "VolumeInputSelector")
         self.cachePathOverride = ivw.properties.FileProperty("cahcePathOverride", "Override Cache Path", "")
         self.useCuda = ivw.properties.BoolProperty("useCuda", "Use CUDA", False)
         self.cleanupTemporaryVolume = ivw.properties.BoolProperty("cleanupTempVol", "Clean up volume that's temporarily created on disk to pass to infer.py", True)
@@ -332,7 +331,6 @@ class DinoSimilarities(ivw.Processor):
             ivw.properties.StringOption("similarities", "Similarities", "sims"),
             ivw.properties.StringOption("concat", "Concat Features", "concat")
         ])
-        # self.runWithScaling = ivw.properties.ButtonProperty("runWithScaling", "Run with scaling")
         self.updatePorts = ivw.properties.ButtonProperty("updateEverything", "Update Callbacks, Ports & Connections", self.updateCallbacksPortsAndConnections)
         self.clearSimilarityCache = ivw.properties.ButtonProperty("clearSimn", "Clear Similarity Cache", self.clearSimilarity)
         self.sliceAlong = ivw.properties.OptionPropertyString("sliceAlong", "DINO Slice along Axis", [
@@ -346,7 +344,6 @@ class DinoSimilarities(ivw.Processor):
         self.sigmaLuma = ivw.properties.IntProperty("blSigmaLuma", "BL: SigmaLumal", 5, 1, 16)
         self.openCloseIterations = ivw.properties.IntProperty("openCloseIterations", "Open-Close Iterations", 1, 0, 8)
         self.addProperty(self.dinoProcessorIdentifier)
-        self.addProperty(self.volumeInputSelectorIdentifier)
         self.addProperty(self.cachePathOverride)
         self.addProperty(self.useCuda)
         self.addProperty(self.cleanupTemporaryVolume)
@@ -465,7 +462,6 @@ class DinoSimilarities(ivw.Processor):
     def connectVolumeOutports(self):
         print('connectVolumeOutports()')
         simInport = get_processor(self.dinoProcessorIdentifier.value).getInport('similarity')
-        volumeInputSelectorInport = get_processor(self.volumeInputSelectorIdentifier.value).getInport('inport')
         net = get_network()
         ports_with_data = get_similarity_params(self.dinoProcessorIdentifier.value, return_empty=False).keys()
         all_ports = set(get_similarity_params(self.dinoProcessorIdentifier.value, return_empty=True).keys())
@@ -477,7 +473,6 @@ class DinoSimilarities(ivw.Processor):
                     # simInport.connectTo(v) # does not fully connect the ports (visual link is missing, some things go wrong)
                     net.addConnection(self.outs[k], simInport)
                     print(f'Connecting {simInport.identifier} to {self.outs[k].identifier}.')
-                    net.addConnection(self.outs[k], volumeInputSelectorInport)
 
     def updateFeatvolDevice(self):
         print('updateFeatvolDevice()')
