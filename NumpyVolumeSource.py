@@ -1,7 +1,7 @@
 # Name: NumpyVolumeSource
 
 import inviwopy as ivw
-from inviwopy.properties import FileProperty, BoolProperty
+from inviwopy.properties import FileProperty, BoolProperty, StringProperty
 from inviwopy.data       import VolumeOutport, Volume
 from inviwopy.glm        import dvec2
 
@@ -16,6 +16,8 @@ class NumpyVolumeSource(ivw.Processor):
         self.outport = VolumeOutport("outport")
         self.addOutport(self.outport, owner=False)
 
+        self.outport_id = StringProperty('outport_id', 'Outport ID', 'outport')
+        self.outport_id.onChange(self.updateOutportId)
         self.vol_path = FileProperty('filename', 'Volume path')
         self.normalize = BoolProperty('normalize', 'Fix Data Range to [0,1]', True)
         self.outputAs = ivw.properties.OptionPropertyString("outputAs", "Output As", [
@@ -27,8 +29,14 @@ class NumpyVolumeSource(ivw.Processor):
         self.addProperty(self.vol_path)
         self.addProperty(self.normalize)
         self.addProperty(self.outputAs)
+        self.addProperty(self.outport_id)
 
         self.vol = None
+
+    def updateOutportId(self):
+        self.removeOutport(self.outport)
+        self.outport = VolumeOutport(self.outport_id.value)
+        self.addOutport(self.outport, owner=False) 
 
     @staticmethod
     def processorInfo():
@@ -67,7 +75,13 @@ class NumpyVolumeSource(ivw.Processor):
         if self.vol is not None:
             print(f'NumpyVolumeSource: Setting Outport: {self.vol.shape} ({self.vol.dtype})')
             vol = self.vol
-            volume = Volume(ivw.data.VolumePy(np.ascontiguousarray(np.transpose(vol, (2,1,0,3)).reshape(vol.shape))))
+            if vol.ndim == 4:
+                volume = Volume(np.ascontiguousarray(np.transpose(vol, (2,1,0,3)).reshape(vol.shape)))
+            elif vol.ndim == 3:
+                volume = Volume(np.asfortranarray(vol))
+            else:
+                raise Exception(f'Invalid volume dimension: {vol.ndim}')
             volume.dataMap.dataRange = dvec2(vol.min(), vol.max())
             volume.dataMap.valueRange= dvec2(vol.min(), vol.max())
+            # volume.interpolation = ivw.data.InterpolationType.Nearest
             self.outport.setData(volume)
