@@ -14,6 +14,10 @@ def make_nd(t, n):
         nons = [None]*(n-t.ndim)
         return t[nons]
 
+def make_3d(t):
+    '''  Prepends singleton dimensions to `t` until 3D '''
+    return make_nd(t, 3)
+
 def make_4d(t):
     '''  Prepends singleton dimensions to `t` until 4D '''
     return make_nd(t, 4)
@@ -35,6 +39,8 @@ in_std = [0.229, 0.224, 0.225]
 def get_dino_model(name):
     return torch.hub.load('facebookresearch/dino:main', f'dino_{name}')
 
+def get_dinov2_model(name):
+    return torch.hub.load('facebookresearch/dinov2', f'dinov2_{name}')
 def sample_features3d(feat_vol, rel_coords, mode='nearest'):
     '''Samples features at given coords from `feat_vol` by interpolating the feature maps in all dimensions. This should result in nearest interpolation along the un-reduced dimension
 
@@ -48,15 +54,13 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
 
     '''
     # Flip dims to get X,Y,Z -> Z,Y,X
-    if feat_vol.ndim == 4: feat_vol.unsqueeze_(0)     # Ensure 5D
-    if rel_coords.ndim == 3: rel_coords.unsqueeze_(0) # Ensure 4D
+    if feat_vol.ndim == 4: feat_vol = make_5d(feat_vol)     # Ensure 5D
+    if rel_coords.ndim == 3: rel_coords = make_4d(rel_coords) # Ensure 4D
     if rel_coords.size(0) != feat_vol.size(0):        # Expand M dimension to feat_vol's
         rel_coords = rel_coords.expand(feat_vol.size(0),-1,-1,-1)
     rel_coords.unsqueeze_(-2) # Make 5D
     grid_idx = rel_coords.flip(dims=(-1,)).to(feat_vol.dtype).to(feat_vol.device) # (1, 1, C, A, 3)
-    print('grid_idx', grid_idx.shape)
     feats = F.grid_sample(make_5d(feat_vol), grid_idx, mode=mode, align_corners=False)
-    print('feats', feats.shape)
     # (M, F, C*A, K, 1) -> (M, C, A, F)
     return feats.squeeze(-1).permute(0,2,3,1).contiguous()
 
@@ -93,10 +97,11 @@ def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0, feature_sampling
     print('resample_topk() sims:', sims.shape)
     return sims.mean(dim=3).to(feat_vol.dtype).to(feat_vol.device)
 
-def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ=torch.float32):
-    patch_size = 8
+def _noop(x, **kwargs): return x
 
-    model = get_dino_model('vits8').to(dev)
+def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, slice_along='z', return_keys=['q', 'k', 'v'], dev=torch.device('cpu'), typ=torch.float32):
+    if isinstance(return_keys, str): return_keys = [return_keys]
+    model = model.to(dev)
     model.eval()
     feat_out = []
     def hook_fn_forward_qkv(module, input, output):
@@ -109,55 +114,80 @@ def compute_qkv(vol, batch_size=1, slice_along='z', dev=torch.device('cpu'), typ
         'y': ((2, 0, 1, 3), (1,2,0,3)),
         'x': ((1, 0, 2, 3), (1,0,2,3))
     }
+    image_sizes = {
+        'z': (im_sizes[0], im_sizes[1]),
+        'y': (im_sizes[0], im_sizes[2]),
+        'x': (im_sizes[1], im_sizes[2])
+    }
+    target_slices = {
+        'z': im_sizes[2] // patch_size,
+        'y': im_sizes[1] // patch_size,
+        'x': im_sizes[0] // patch_size
+    }
     permute_in, permute_out = slice_along_permutes[slice_along]
     image = make_4d(vol).permute(*permute_in).expand(-1, 3, -1, -1)
     image = normalize(norm_minmax(image), in_mean, in_std)
-    im_sz = image.shape[-2:]
+    im_sz = image_sizes[slice_along]
+    num_slices = image.size(0)
+    targ_slices = target_slices[slice_along]
+    # print('Discarding slices to get from ', num_slices, ' to ', targ_slices)
+    # slice_range = F.interpolate(torch.arange(num_slices).view(1,1,-1).float(), size=targ_slices, mode='nearest').squeeze().long()
+    # print(slice_range)
+    # offset = (num_slices - slice_range.max()) // 2
+    # slice_range += offset
+    # print(slice_range)
+    # image = image[slice_range]
+    # print('Indices of chosen slices:', slice_range)
 
-    print('Network Input:', image.shape, image.dtype, image.min(), image.max())
+    feat_out_sz = tuple(map(lambda d: d // patch_size, im_sizes))
+    print('Network Input (unscaled):', image.shape, image.dtype, image.min(), image.max())
+    print('-> Scaled to images of shape:', im_sz, ' to get feats of size ', feat_out_sz)
 
     # forward pass
-    out = []
     with torch.cuda.amp.autocast(enabled=True, dtype=typ):
         with torch.no_grad():
             im_in = image.to(dev)
             for batch in torch.arange(im_in.size(0)).split(batch_size):
-                _ = model(im_in[batch])
-            attentions = model.get_last_selfattention(im_in[[0]])
-    # Scaling factor
-    scales = [patch_size, patch_size]
+                _ = model(F.interpolate(im_in[batch], size=im_sz, mode='bilinear', align_corners=False))
 
     # Dimensions
-    nb_im = im_in.size(0) # Batch sizemonitor
-    nh = attentions.shape[1]  # Number of heads
-    nb_tokens = attentions.shape[2]  # Number of tokens
+    nh = model._modules["blocks"][-1]._modules["attn"].num_heads
+    nb_im = image.size(0) # Batch sizemonitor
+    f_sz = im_sz[0] // patch_size , im_sz[1] // patch_size
 
+    del model
+    merged_feats = torch.cat(feat_out)
+    print('merged_feats:', merged_feats.shape, merged_feats.dtype, merged_feats.device)
+    nb_tokens = merged_feats.shape[1]
+    print('Model num heads:', nh, ' num tokens:', nb_tokens)
     # Extract the qkv features of the last attention layer
     qkv = (
-        torch.cat(feat_out[:-1])
+        merged_feats
         .view(nb_im, nb_tokens, 3, nh, -1 // nh)
         .permute(2, 0, 3, 1, 4)
     )
-    q, k, v = qkv[0].cpu(), qkv[1].cpu(), qkv[2].cpu()
-    f_sz = im_sz[0] // patch_size , im_sz[1] // patch_size
-    k = k.transpose(1, 2).view(nb_im, nb_tokens, -1)
-    k = k[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-    q = q.transpose(1, 2).view(nb_im, nb_tokens, -1)
-    q = q[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-    v = v.transpose(1, 2).view(nb_im, nb_tokens, -1)
-    v = v[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-    qkv = {
-        'q': q.permute(*permute_out),
-        'k': k.permute(*permute_out),
-        'v': v.permute(*permute_out)
-    }
+    q, k, v = qkv[0], qkv[1], qkv[2]
+    qkv = {}
+    if 'q' in return_keys:
+        q = q.transpose(1, 2).view(nb_im, nb_tokens, -1)
+        q = q[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
+        qkv['q'] = pool_fn(q.permute(*permute_out)).cpu()
+    del q
+    if 'k' in return_keys:     
+        k = k.transpose(1, 2).view(nb_im, nb_tokens, -1)
+        k = k[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
+        qkv['k'] = pool_fn(k.permute(*permute_out)).cpu()
+    del k
+    if 'v' in return_keys:
+        v = v.transpose(1, 2).view(nb_im, nb_tokens, -1)
+        v = v[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
+        qkv['v'] = pool_fn(v.permute(*permute_out)).cpu()
+    del v
     return qkv
 
 if __name__ == '__main__':
-    dino_archs = ['vits16', 'vits8', 'vitb16', 'vitb8',
-        'xcit_small_12_p16', 'xcit_small_12_p8',
-        'xcit_medium_24_p16', 'xcit_medium_24_p8',
-        'resnet50']
+    dino_archs = ['vits16', 'vits8', 'vitb16', 'vitb8']
+    dino2_archs = ['vits14', 'vitb14', 'vitl14', 'vitg14']
     from pathlib import Path
     from argparse import ArgumentParser
     import os, sys
@@ -175,15 +205,35 @@ if __name__ == '__main__':
     parser = ArgumentParser('Infer DINO features from saved volume')
     parser.add_argument('--data-path', type=str, required=True, help='Path to the saved volume')
     parser.add_argument('--cache-path', type=str, required=True, help='Path to save computed qkv features to.')
-    parser.add_argument('--dino-model', type=str, choices=dino_archs, default='vits8', help='DINO model to use')
+    parser.add_argument('--dino-model', type=str, choices=dino_archs, default=None, help='DINO model to use')
+    parser.add_argument('--dino2-model', type=str, choices=dino2_archs, default=None, help='DINOv2 model to use')
     parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
     parser.add_argument('--batch-size', type=int, default=2, help='Feed volume through network in batches')
-    parser.add_argument('--feature-downsize-factor', type=int, default=4, help='Rescales the feature map to input volume extent // this factor. With a ViTs8 this needs to be 8 to prevent upscaling of feature maps. Only if --slice-along ALL')
+    parser.add_argument('--feature-output-size', type=int, default=64, help='Produces a features map with aspect ratio of input volume with this value as y resolution. Only if --slice-along ALL')
     args = parser.parse_args()
 
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     typ = torch.float16 if dev == torch.device('cuda') else torch.float32
-    patch_size = 8 if args.dino_model[-1] == '8' else 16
+    # Determine DINO model and patch size
+    if not args.dino_model and not args.dino2_model:
+        print('No DINO/DINOv2 model specified, using default: vits8')
+        dino_model = 'vits8'
+        dino_model_fn = get_dino_model
+        patch_size = 8
+    elif args.dino_model and args.dino2_model:
+        print(f'Both --dino-model and --dino2-model were set. Please only set one of them.')
+        sys.exit(1)
+    elif args.dino_model:
+        dino_model = args.dino_model
+        dino_model_fn = get_dino_model
+        patch_size = 8 if dino_model[-1] == '8' else 16
+    elif args.dino2_model:
+        dino_model = args.dino2_model
+        dino_model_fn = get_dinov2_model
+        patch_size = 14
+    else:
+        print('Something weird happend with --dino-model / --dino2-model. Set exactly 1 of them.')
+        sys.exit(1)
 
     data_path = Path(args.data_path)
     cache_path = Path(args.cache_path)
@@ -214,15 +264,24 @@ if __name__ == '__main__':
             assert vol.ndim == 3
         else:
             print(f'Unsupported file extension: {data_path.suffix}')
+
+        # Compute Input Image Size
+        ref_fact = sorted(vol.shape[-3:])[1] / args.feature_output_size
+        im_sz       = tuple(map(lambda d: int(patch_size * (d // ref_fact)), vol.shape[-3:]))
+        feat_out_sz = tuple(map(lambda d: d // patch_size, im_sz))
+        print(f'Input image size: {im_sz}')
+
+        # Compute Features
+        model = dino_model_fn(dino_model)
         if args.slice_along in ['x', 'y', 'z']:
-            qkv = compute_qkv(vol, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
+            qkv = compute_qkv(vol, model, patch_size, im_sz, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
         elif args.slice_along == 'all':
-            feat_res = tuple(map(lambda d: int(d // args.feature_downsize_factor), vol.shape))
-            # feat_res = (args.feature_resolution, args.feature_resolution, args.feature_resolution)
-            qkv = {'q': 0, 'k': 0, 'v': 0}
+            qkv = defaultdict(float)
+            avg_pool = torch.nn.AdaptiveAvgPool3d(output_size=feat_out_sz)
             for ax in ['x', 'y', 'z']:
-                for k,v in compute_qkv(vol, batch_size=args.batch_size, slice_along=ax, dev=dev, typ=typ).items():
-                    qkv[k] += (F.interpolate(make_5d(v).float(), feat_res, mode='trilinear', align_corners=False).squeeze(0) / 3.0).half()
+                for k,v in compute_qkv(vol, model, patch_size, im_sz, pool_fn=avg_pool, batch_size=args.batch_size, return_keys='k', slice_along=ax, dev=dev, typ=typ).items():
+                    qkv[k] += v.cpu().squeeze().half()
+                    print(k, ':', qkv[k].shape)
         else:
             raise Exception(f'Invalid argument for --slice-along: {args.slice_along}. Must be x,y,z or all')
         print(f'Computed qkv, saving now to: {cache_path}')
