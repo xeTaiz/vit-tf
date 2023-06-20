@@ -47,8 +47,9 @@ if __name__ == '__main__':
     label = np.load(DATA_DIR / 'labels-10.npy', allow_pickle=True) 
     label_lores = F.interpolate(make_5d(torch.from_numpy(label)), size=feats.shape[-3:], mode='nearest').squeeze()
     num_classes_with_bg = int(label.max()+1)
+    num_classes_wo_bg = num_classes_with_bg - 1
 
-    head = torch.nn.Linear(feats.size(0), label.max())
+    head = torch.nn.Linear(feats.size(0), num_classes_wo_bg)
     opt = torch.optim.AdamW(head.parameters(), args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, args.num_epochs)
     iou = MulticlassJaccardIndex(num_classes=num_classes_with_bg, average='none')
@@ -74,7 +75,7 @@ if __name__ == '__main__':
 
     samples, gts = {}, {}
     for sample in [sample_uniform, sample_surface, sample_both]:
-        for i in range(1,label.max()+1):
+        for i in range(1,num_classes_wo_bg+1):
             mask = label == i
             if args.num_samples > 1.0:
                 N_SAMPLES = min(int(args.num_samples), mask.sum().item())
@@ -85,7 +86,7 @@ if __name__ == '__main__':
             print(f'mask {i}', mask.shape, mask.sum().item())
             print('N_SAMPLES', N_SAMPLES)
             samples[i] = sample(mask, N_SAMPLES)
-            gts[i] = F.one_hot(torch.tensor([i-1]).expand(N_SAMPLES).long().to(dev), label.max()).to(typ)
+            gts[i] = F.one_hot(torch.tensor([i-1]).expand(N_SAMPLES).long().to(dev), num_classes_wo_bg).to(typ)
             print(f'Class {i} has {mask.sum()} voxels, sampling {N_SAMPLES}')
 
         # Train
