@@ -24,7 +24,8 @@ class NumpyVolumeSource(ivw.Processor):
             ivw.properties.StringOption("uint8", 'UINT8', 'u8'),
             ivw.properties.StringOption("uint16", 'UINT16', 'u16'),
             ivw.properties.StringOption("float16", 'FLOAT16', 'f16'),
-            ivw.properties.StringOption("float32", 'FLOAT32', 'f32')
+            ivw.properties.StringOption("float32", 'FLOAT32', 'f32'),
+            ivw.properties.StringOption('asis', "AS IS", 'asis')
         ])
         self.addProperty(self.vol_path)
         self.addProperty(self.normalize)
@@ -67,6 +68,8 @@ class NumpyVolumeSource(ivw.Processor):
                 self.vol = self.vol.astype(np.float16)
             elif self.outputAs.value == 'f32':
                 self.vol = self.vol.astype(np.float32)
+            elif self.outputAs.value == 'asis':
+                pass
             else:
                 raise Exception(f'Invalid output format: {self.outputAs.value}')
             print(f'Contiguity:  C: {self.vol.flags["C_CONTIGUOUS"]}     F: {self.vol.flags["F_CONTIGUOUS"]}')
