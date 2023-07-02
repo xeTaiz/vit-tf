@@ -210,9 +210,10 @@ if __name__ == '__main__':
     parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
     parser.add_argument('--batch-size', type=int, default=2, help='Feed volume through network in batches')
     parser.add_argument('--feature-output-size', type=int, default=64, help='Produces a features map with aspect ratio of input volume with this value as y resolution. Only if --slice-along ALL')
+    parser.add_argument('--cpu', action='store_true', help='Use CPU only')
     args = parser.parse_args()
 
-    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dev = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     typ = torch.float16 if dev == torch.device('cuda') else torch.float32
     # Determine DINO model and patch size
     if not args.dino_model and not args.dino2_model:
