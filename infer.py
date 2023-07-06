@@ -148,7 +148,7 @@ def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, s
         with torch.no_grad():
             im_in = image.to(dev)
             for batch in torch.arange(im_in.size(0)).split(batch_size):
-                _ = model(F.interpolate(im_in[batch], size=im_sz, mode='bilinear', align_corners=False))
+                _ = model(F.interpolate(im_in[batch], size=im_sz, mode='nearest'))
 
     # Dimensions
     nh = model._modules["blocks"][-1]._modules["attn"].num_heads
@@ -166,24 +166,23 @@ def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, s
         .view(nb_im, nb_tokens, 3, nh, -1 // nh)
         .permute(2, 0, 3, 1, 4)
     )
-    q, k, v = qkv[0], qkv[1], qkv[2]
-    qkv = {}
+    out = {}
     if 'q' in return_keys:
-        q = q.transpose(1, 2).view(nb_im, nb_tokens, -1)
+        q = qkv[0].transpose(1, 2).view(nb_im, nb_tokens, -1)
         q = q[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-        qkv['q'] = pool_fn(q.permute(*permute_out)).cpu()
-    del q
-    if 'k' in return_keys:     
-        k = k.transpose(1, 2).view(nb_im, nb_tokens, -1)
+        out['q'] = pool_fn(q.permute(*permute_out)).cpu()
+        del q
+    if 'k' in return_keys:
+        k = qkv[1].transpose(1, 2).view(nb_im, nb_tokens, -1)
         k = k[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-        qkv['k'] = pool_fn(k.permute(*permute_out)).cpu()
-    del k
+        out['k'] = pool_fn(k.permute(*permute_out)).cpu()
+        del k
     if 'v' in return_keys:
-        v = v.transpose(1, 2).view(nb_im, nb_tokens, -1)
+        v = qkv[2].transpose(1, 2).view(nb_im, nb_tokens, -1)
         v = v[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-        qkv['v'] = pool_fn(v.permute(*permute_out)).cpu()
-    del v
-    return qkv
+        out['v'] = pool_fn(v.permute(*permute_out)).cpu()
+        del v
+    return out
 
 if __name__ == '__main__':
     dino_archs = ['vits16', 'vits8', 'vitb16', 'vitb8']
