@@ -10,8 +10,10 @@ from scipy.ndimage import binary_erosion, generate_binary_structure
 DATA_DIR = Path('/run/media/dome/SSD/Data/Volumes/CT-ORG')
 ONE = torch.ones(1)
 
-def sample_uniform(vol, n_samples):
+def sample_uniform(vol, n_samples, thin_to_reasonable=False):
     idxs = torch.from_numpy(vol).nonzero()
+    while thin_to_reasonable and idxs.size(0) > int(2**24):
+        idxs = idxs[::2]
     return idxs[torch.multinomial(ONE.expand(idxs.size(0)), n_samples)]
 
 def sample_surface(vol, n_samples, dist_from_surface=4):
