@@ -11,7 +11,7 @@ DATA_DIR = Path('/run/media/dome/SSD/Data/Volumes/CT-ORG')
 ONE = torch.ones(1)
 
 def sample_uniform(vol, n_samples, thin_to_reasonable=False):
-    idxs = torch.from_numpy(vol).nonzero()
+    idxs = torch.as_tensor(vol).nonzero()
     while thin_to_reasonable and idxs.size(0) > int(2**24):
         idxs = idxs[::2]
     return idxs[torch.multinomial(ONE.expand(idxs.size(0)), n_samples)]
@@ -24,7 +24,7 @@ def sample_surface(vol, n_samples, dist_from_surface=4):
     print('outer', outer.sum(), tuple(map(lambda c: (c.min(), c.max()), outer.nonzero())))
     print('inner', inner.sum(), tuple(map(lambda c: (c.min(), c.max()), inner.nonzero())))
 
-    surface_idxs = torch.from_numpy(np.logical_xor(inner, outer)).nonzero()
+    surface_idxs = torch.as_tensor(np.logical_xor(inner, outer)).nonzero()
     if surface_idxs.size(0) > n_samples:
         return surface_idxs[torch.multinomial(ONE.expand(surface_idxs.size(0)), n_samples)]
     else:

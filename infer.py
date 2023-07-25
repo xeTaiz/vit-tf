@@ -55,6 +55,7 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
     '''
     # Flip dims to get X,Y,Z -> Z,Y,X
     if feat_vol.ndim == 4: feat_vol = make_5d(feat_vol)     # Ensure 5D
+    if rel_coords.ndim == 2: rel_coords = make_4d(rel_coords) # Ensure 4D
     if rel_coords.ndim == 3: rel_coords = make_4d(rel_coords) # Ensure 4D
     if rel_coords.size(0) != feat_vol.size(0):        # Expand M dimension to feat_vol's
         rel_coords = rel_coords.expand(feat_vol.size(0),-1,-1,-1)
@@ -63,6 +64,7 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
     feats = F.grid_sample(make_5d(feat_vol), grid_idx, mode=mode, align_corners=False)
     # (M, F, C*A, K, 1) -> (M, C, A, F)
     return feats.squeeze(-1).permute(0,2,3,1).contiguous()
+
 
 def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0, feature_sampling_mode='nearest'):
     ''' Re-samples the feature volume at the `K` most similar locations.

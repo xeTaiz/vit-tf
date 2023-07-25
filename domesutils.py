@@ -11,7 +11,7 @@ from sklearn.decomposition import PCA
 from icecream import ic, argumentToString
 @argumentToString.register(np.ndarray)
 def _(t):
-    contig = f'{"C" if t.flags["C_CONTIGUOUS"]} {"F" if t.flags["F_CONTIGUOUS"]}'.strip()
+    contig = f'{"C" if t.flags["C_CONTIGUOUS"] else ""} {"F" if t.flags["F_CONTIGUOUS"] else ""}'.strip()
     if len(contig) == 0: contig = "NOT"
     return f'{tuple(t.shape)} of type {t.dtype} (NumPy) in value range [{t.min().item():.3f}, {t.max().item():.3f}] ({contig} contiguous)'
 
@@ -83,7 +83,7 @@ def feature_std(t, reduce_dim=None, feature_dim=-1):
     Returns:
         torch.Tensor: Standard deviation of feature distances. Has same shape as input without `reduce_dim` and `feature_dim` dimensions
     '''
-    if reduce_dim is None: 
+    if reduce_dim is None:
         reduce_dim = list(range(t.ndim))
         del reduce_dim[feature_dim]
     else:
