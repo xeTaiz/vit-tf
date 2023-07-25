@@ -5,6 +5,7 @@ from scipy.sparse.linalg import cg
 
 import icecream as ic
 from domesutils import *
+from infer import make_5d
 
 __all__ = ['apply_bilateral_solver3d']
 
@@ -173,39 +174,89 @@ bs_params_default = {
     'cg_maxiter': 25 # The number of PCG iterations
 }
 
+def filter_gauss_separated(input):
+    win = torch.tensor([0.25, 0.5, 0.25])[None, None, None, None].to(input.dtype)
+    out = F.conv3d(input, win, groups=input.size(1), padding=(0,0,1))
+    out = F.conv3d(out, win.transpose(3, 4), groups=input.size(1), padding=(0,1,0))
+    out = F.conv3d(out, win.transpose(2, 4), groups=input.size(1), padding=(1,0,0))
+    return out
+
+def filter_sobel_separated(input):
+    win = torch.tensor([-0.5, 0, 0.5])[None, None, None, None].to(input.dtype)
+    out = F.conv3d(input, win, groups=input.size(1), padding=(0,0,1))**2
+    out += F.conv3d(input, win.transpose(3, 4), groups=input.size(1), padding=(0,1,0))**2
+    out += F.conv3d(input, win.transpose(2, 4), groups=input.size(1), padding=(1,0,0))**2
+    return out.sqrt()
+
+def crop_pad(sim, thresh=0.1, pad=0):
+    ''' Crop `sim` to the region where `sim > thresh` and pad by `pad` pixels on each side. If `sim` is a list the first element is used to determine the crop region.
+        Args:
+            sim(list or torch.Tensor): similarity map (W, H, D) or List of such tensors
+            thresh(float): threshold for cropping
+            pad(int): padding size (Can be tuple like for `torch.nn.functional.pad`)
+
+        Returns:
+            torch.Tensor: cropped and padded similarity map
+    '''
+    if isinstance(sim, list):
+        others = sim
+        sim = others[0]
+    else:
+        others = [sim]
+    nz = torch.nonzero(sim > thresh)
+    mi = torch.clamp(nz.min(dim=0).values[-3:] - pad,     0, None)
+    ma = torch.clamp(nz.max(dim=0).values[-3:] + pad + 1, None, torch.tensor(sim.shape[-3:]))
+    if len(others) > 1:
+        return [s[...,mi[0]:ma[0], mi[1]:ma[1], mi[2]:ma[2]] for s in others], (mi, ma)
+    else:
+        return sim[...,mi[0]:ma[0], mi[1]:ma[1], mi[2]:ma[2]], (mi, ma)
+
+def write_crop_into(uncropped, crop, mima):
+    mi, ma = mima
+    uncropped[..., mi[0]:ma[0], mi[1]:ma[1], mi[2]:ma[2]] = crop
+    return uncropped
+
 def apply_bilateral_solver3d(t: torch.Tensor, r: torch.Tensor, c: torch.Tensor = None, grid_params={}, bs_params={}):
     ''' Applies bilateral solver on target `t` using confidence `c` and reference `r`.
 
     Args:
         t (torch.Tensor): Target to filter (1, W, H, D) as float with value range [0,1]
-        r (torch.Tensor): Reference image  (1, W, H, D) as uint8 with value range [0,255]
+        r (torch.Tensor): Reference image  (3, W, H, D) as uint8 with value range [0,255]
         c (torch.Tensor): Confidence for target (Defaults to target image `t`) (1, W, H, D) as float with value range [0, 1]
         grid_params (dict, optional): Grid parameters for bilateral solver. May include `sigma_luma`, `sigma_chroma` and `sigma_spatial`.
         bs_params (dict, optional): Bilateral solver parameters. May inlcude `lam`, `A_diag_min`, `cg_tol` and `cg_maxiter`.
-    
+
     Returns:
         torch.Tensor: Bilaterally solved target (1, W, H, D) as torch.float32
     '''
+    print('Solver Input:')
+    print('t', t.shape, t.dtype, t.min(), t.max())
+    print('r', r.shape, r.dtype, r.min(), r.max())
+    tmp = t
     gp = {**grid_params_default, **grid_params}
     bs = {**bs_params_default, **bs_params}
     shap = t.shape[-3:]
     t = t.cpu().permute(1,2,3,0).numpy().squeeze(-1).reshape(-1, 1).astype(np.double)
-    ic(r)
-    r = r.cpu().permute(1,2,3,0).numpy()
-    ic(r)
     if c is None:
-        c = t
-        c = np.ones(shap).reshape(-1,1) * 0.999
+        # c = np.ones(shap).reshape(-1,1) * 0.999
+        # print('np.ones confidence', c.shape, c.dtype, c.min(), c.max())
+
+        # print('reference in', r.shape, r.min(), r.max())
+        c = filter_sobel_separated(make_5d(r[[0]]).float() / 255.0)
+        c = c.squeeze(0) # switch with below line to enable blurring
+        # c = filter_gauss_separated(c).squeeze(0)
+        # print('confidence', c.shape, c.dtype, c.min(), c.max())
+        c = (c.max() - c).numpy().astype(np.double).reshape(-1, 1)
+        # print('confidence', c.shape, c.dtype, c.min(), c.max())
     else:
         c = c.cpu().permute(1,2,3,0).numpy().astype(np.double).reshape(-1,1)
-    ic(t)
-    ic(r)
-    ic(c)
-
+    print('c', c.shape, c.dtype, c.min(), c.max())
+    r = r.cpu().permute(1,2,3,0).numpy()
     grid = BilateralGrid(r, **gp)
     solver = BilateralSolver(grid, bs)
     out = solver.solve(t, c).reshape(*shap)
-    return torch.from_numpy(out).to(torch.float32).squeeze()
+    return torch.nan_to_num(torch.from_numpy(out).to(torch.float32).squeeze())
+
 
 
 if __name__ == '__main__':
