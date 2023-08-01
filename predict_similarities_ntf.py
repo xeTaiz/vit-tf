@@ -11,6 +11,9 @@ from bilateral_solver3d import apply_bilateral_solver3d, crop_pad, write_crop_in
 from argparse import ArgumentParser
 from pathlib import Path
 from pprint import pprint
+from icecream import ic
+import domesutils
+
 
 sampling_modes = {
     'uniform': sample_uniform,
@@ -72,7 +75,7 @@ def compute_similarities(volume, features, annotations, bilateral_solver=False):
                     'sigma_luma': 3,
                 }
                 vol = F.interpolate(make_5d(torch.as_tensor(volume)), sim_shape, mode='trilinear').squeeze()
-                vol = make_4d(vol.squeeze()).flip(-3)
+                # vol = make_4d(vol.squeeze()).flip(-3)
                 print('vol after interpolation', vol.shape)
                 vol = norm_minmax(vol)
                 vol = (255.0 * vol).to(torch.uint8)
@@ -107,6 +110,8 @@ if __name__ == '__main__':
     volume =      np.load(dir / 'volume.npy', allow_pickle=True).astype(np.float32)
     labels =      np.load(dir / 'labels.npy', allow_pickle=True)
     features =    np.load(dir / 'dino_features.npy', allow_pickle=True)[()]
+    volume = np.flip(volume, axis=-3).copy()
+    labels = np.flip(labels, axis=-3).copy()
     if isinstance(features, dict):
         features = torch.as_tensor(features['k']).float().squeeze()
     else:
@@ -175,18 +180,28 @@ if __name__ == '__main__':
     print('Pred:', pred.shape, pred.min(), pred.max())
     print('NTF fit time:', t1 - t0)
     print('NTF predict time:', t2 - t1)
+    # Slicerei
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(1,2, dpi=200)
+    ax[0].imshow(pred[:,:,420])
+    ax[1].imshow(labels[:,:,420])
+    fig.savefig('testonerhnfdsdf.png')
+
     pred = pred.reshape(-1)
+    ic(pred)
+    ic(labels.reshape(-1))
     prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), pred, average=None)
     cm = confusion_matrix(labels.reshape(-1), pred)
     acc = cm.diagonal() / cm.sum(axis=1)
     iou = jaccard_score(labels.reshape(-1), pred, average=None)
+    label_names = ['background'] + list(annotations.keys())
     ntf_metrics = {
-        'accuracy': dict(zip(annotations.keys(), acc.tolist())),
-        'precision': dict(zip(annotations.keys(), prec.tolist())),
-        'recall': dict(zip(annotations.keys(), rec.tolist())),
-        'f1': dict(zip(annotations.keys(), f1.tolist())),
-        'iou': dict(zip(annotations.keys(), iou.tolist())),
-        'confusion_matrix': dict(zip(annotations.keys(), cm.tolist())),
+        'accuracy': dict(zip(label_names, acc.tolist())),
+        'precision': dict(zip(label_names, prec.tolist())),
+        'recall': dict(zip(label_names, rec.tolist())),
+        'f1': dict(zip(label_names, f1.tolist())),
+        'iou': dict(zip(label_names, iou.tolist())),
+        'confusion_matrix': dict(zip(label_names, cm.tolist())),
         'fit_time': t1 - t0,
         'predict_time': t2 - t1,
     }
@@ -194,3 +209,9 @@ if __name__ == '__main__':
     pprint(ntf_metrics)
     with open(dir / f'ntf_metrics{args.num_samples}{args.sampling_mode}{bls_str}.json', 'w') as f:
         json.dump(ntf_metrics, f)
+    for i in range(0, labels.max()+1):
+        nam = label_names[i]
+        pred_bin = pred == i
+        labl_bin = labels.reshape(-1) == i
+        bin_iou = jaccard_score(labl_bin, pred_bin)
+        print(f'Binary {nam} IOU:', bin_iou)
