@@ -27,26 +27,32 @@ class NumpyVolumeSource(ivw.Processor):
             ivw.properties.StringOption("float32", 'FLOAT32', 'f32'),
             ivw.properties.StringOption('asis', "AS IS", 'asis')
         ])
+        self.flipX = BoolProperty('flipX', 'Flip X', False)
+        self.flipY = BoolProperty('flipY', 'Flip Y', False)
+        self.flipZ = BoolProperty('flipZ', 'Flip Z', False)
         self.addProperty(self.vol_path)
         self.addProperty(self.normalize)
         self.addProperty(self.outputAs)
         self.addProperty(self.outport_id)
+        self.addProperty(self.flipX)
+        self.addProperty(self.flipY)
+        self.addProperty(self.flipZ)
 
         self.vol = None
 
     def updateOutportId(self):
         self.removeOutport(self.outport)
         self.outport = VolumeOutport(self.outport_id.value)
-        self.addOutport(self.outport, owner=False) 
+        self.addOutport(self.outport, owner=False)
 
     @staticmethod
     def processorInfo():
         return ivw.ProcessorInfo(
-    		classIdentifier = "org.inviwo.numpyvolumesource",
-    		displayName = "Numpy Volume Source",
-    		category = "Python",
-    		codeState = ivw.CodeState.Stable,
-    		tags = ivw.Tags.PY
+            classIdentifier = "org.inviwo.numpyvolumesource",
+            displayName = "Numpy Volume Source",
+            category = "Python",
+            codeState = ivw.CodeState.Stable,
+            tags = ivw.Tags.PY
         )
 
     def getProcessorInfo(self):
@@ -55,7 +61,7 @@ class NumpyVolumeSource(ivw.Processor):
     def initializeResources(self):
         path = Path(self.vol_path.value)
         if path.exists() and path.suffix == '.npy':
-            self.vol = np.load(path)
+            self.vol = np.load(path, allow_pickle=True)
             print(f'Loaded volume ({tuple(self.vol.shape)}) ({self.vol.dtype}) in [{self.vol.min()}, {self.vol.max()}]')
             if self.normalize.value:
                 self.vol = self.vol.astype(np.float32)
@@ -78,12 +84,20 @@ class NumpyVolumeSource(ivw.Processor):
         if self.vol is not None:
             print(f'NumpyVolumeSource: Setting Outport: {self.vol.shape} ({self.vol.dtype})')
             vol = self.vol
+            if self.flipX.value:
+                vol = np.flip(vol, axis=-3)
+            if self.flipY.value:
+                vol = np.flip(vol, axis=-2)
+            if self.flipZ.value:
+                vol = np.flip(vol, axis=-1)
+
             if vol.ndim == 4:
                 volume = Volume(np.ascontiguousarray(np.transpose(vol, (2,1,0,3)).reshape(vol.shape)))
             elif vol.ndim == 3:
                 volume = Volume(np.asfortranarray(vol))
             else:
                 raise Exception(f'Invalid volume dimension: {vol.ndim}')
+            print('Loaded volume min/max: ', vol.min(), vol.max())
             volume.dataMap.dataRange = dvec2(vol.min(), vol.max())
             volume.dataMap.valueRange= dvec2(vol.min(), vol.max())
             # volume.interpolation = ivw.data.InterpolationType.Nearest
