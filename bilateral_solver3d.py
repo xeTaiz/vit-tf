@@ -67,7 +67,6 @@ class BilateralGrid(object):
         # Construct sparse splat matrix that maps from pixels to vertices
         self.S = csr_matrix(
             (np.ones(self.npixels), (idx, np.arange(self.npixels))))
-        ic(self.S)
         # Construct sparse blur matrices.
         # Note that these represent [1 0 1] blurs, excluding the central element
         self.blurs = []
@@ -81,8 +80,6 @@ class BilateralGrid(object):
                 blur = blur + csr_matrix(
                     (np.ones((len(valid_coord), )), (valid_coord, idx)),
                     shape=(self.nvertices, self.nvertices))
-            if d == 0:
-                ic(blur)
             self.blurs.append(blur)
 
     def _hash_coords(self, coord):
@@ -131,7 +128,6 @@ class BilateralSolver(object):
         self.Dn, self.Dm = bistochastize(grid)
 
     def solve(self, x, w):
-        print('BilateralSolver.solve()')
         # Check that w is a vector or a nx1 matrix
         if w.ndim == 2:
             assert (w.shape[1] == 1)
@@ -157,8 +153,6 @@ class BilateralSolver(object):
                                     maxiter=self.params["cg_maxiter"],
                                     tol=self.params["cg_tol"])
         xhat = self.grid.slice(yhat)
-        ic(yhat)
-        ic(xhat)
         return xhat
 
 grid_params_default = {
@@ -229,10 +223,6 @@ def apply_bilateral_solver3d(t: torch.Tensor, r: torch.Tensor, c: torch.Tensor =
     Returns:
         torch.Tensor: Bilaterally solved target (1, W, H, D) as torch.float32
     '''
-    print('Solver Input:')
-    print('t', t.shape, t.dtype, t.min(), t.max())
-    print('r', r.shape, r.dtype, r.min(), r.max())
-    tmp = t
     gp = {**grid_params_default, **grid_params}
     bs = {**bs_params_default, **bs_params}
     shap = t.shape[-3:]
@@ -250,7 +240,6 @@ def apply_bilateral_solver3d(t: torch.Tensor, r: torch.Tensor, c: torch.Tensor =
         # print('confidence', c.shape, c.dtype, c.min(), c.max())
     else:
         c = c.cpu().permute(1,2,3,0).numpy().astype(np.double).reshape(-1,1)
-    print('c', c.shape, c.dtype, c.min(), c.max())
     r = r.cpu().permute(1,2,3,0).numpy()
     grid = BilateralGrid(r, **gp)
     solver = BilateralSolver(grid, bs)
