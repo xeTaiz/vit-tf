@@ -31,8 +31,8 @@ def sample_surface(vol, n_samples, dist_from_surface=4):
         print(f'Full surface only has {surface_idxs.size(0)} voxels (< n_samples={n_samples}).')
         return surface_idxs
 
-def sample_both(vol, n_samples, dist_from_surface=4):
-    return torch.cat([sample_uniform(vol, n_samples//2), sample_surface(vol, n_samples//2, dist_from_surface=dist_from_surface)])
+def sample_both(vol, n_samples, dist_from_surface=4, thin_to_reasonable=False):
+    return torch.cat([sample_uniform(vol, n_samples//2, thin_to_reasonable=thin_to_reasonable), sample_surface(vol, n_samples//2, dist_from_surface=dist_from_surface)])
 
 if __name__ == '__main__':
     parser = ArgumentParser('Compare similarity maps for different samplings of ground truth segmentations')
