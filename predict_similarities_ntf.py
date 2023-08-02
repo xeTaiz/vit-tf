@@ -152,13 +152,13 @@ if __name__ == '__main__':
         similarities = compute_similarities(volume, features, annotations, bilateral_solver=args.bilateral_solver)
     t2 = time.time()
     # Compare to similarities on disk
-    similarities_exported = np.load(dir / 'similarities.npy', allow_pickle=True)[()]
-    for k in similarities.keys():
-        sim_exp = similarities_exported[k]
-        sim = similarities[k]
-        dist = torch.abs(sim -sim_exp).float()
-        print(f'{k}: {sim.shape} ({sim.min()}, {sim.max()}) vs {sim_exp.shape} ({sim_exp.min()}, {sim_exp.max()})')
-        print('all close?', torch.allclose(sim, sim_exp), 'distance', dist.mean(), 'max distance', dist.max())
+    # similarities_exported = np.load(dir / 'similarities.npy', allow_pickle=True)[()]
+    # for k in similarities.keys():
+        # sim_exp = similarities_exported[k]
+        # sim = similarities[k]
+        # dist = torch.abs(sim -sim_exp).float()
+        # print(f'{k}: {sim.shape} ({sim.min()}, {sim.max()}) vs {sim_exp.shape} ({sim_exp.min()}, {sim_exp.max()})')
+        # print('all close?', torch.allclose(sim, sim_exp), 'distance', dist.mean(), 'max distance', dist.max())
     print('Similarities:', {k: v.shape for k,v in similarities.items()})
     sims = torch.stack(list(similarities.values()))
     # pred[1:] = torch.where(pred[1:] < 50, 0, pred[1:])
@@ -209,9 +209,9 @@ if __name__ == '__main__':
     pprint(ntf_metrics)
     with open(dir / f'ntf_metrics{args.num_samples}{args.sampling_mode}{bls_str}.json', 'w') as f:
         json.dump(ntf_metrics, f)
-    for i in range(0, labels.max()+1):
-        nam = label_names[i]
-        pred_bin = pred == i
-        labl_bin = labels.reshape(-1) == i
-        bin_iou = jaccard_score(labl_bin, pred_bin)
-        print(f'Binary {nam} IOU:', bin_iou)
+    # for i in range(0, labels.max()+1):
+    #    nam = label_names[i]
+    #    pred_bin = pred == i
+    #    labl_bin = labels.reshape(-1) == i
+    #    bin_iou = jaccard_score(labl_bin, pred_bin)
+    #    print(f'Binary {nam} IOU:', bin_iou)
