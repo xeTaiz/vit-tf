@@ -239,7 +239,7 @@ if __name__ == '__main__':
 
     data_path = Path(args.data_path)
     if not args.cache_path:
-        args.cache_path = data_path.parent / f'{data_path.stem}_{args.slice_along}_features{args.feature_output_size}.{data_path.suffix}'
+        args.cache_path = data_path.parent / f'{data_path.stem}_{dino_model}_{args.slice_along}_features{args.feature_output_size}.{data_path.suffix}'
     cache_path = Path(args.cache_path)
 
     if not data_path.exists():
