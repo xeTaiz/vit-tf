@@ -205,11 +205,11 @@ if __name__ == '__main__':
 
     parser = ArgumentParser('Infer DINO features from saved volume')
     parser.add_argument('--data-path', type=str, required=True, help='Path to the saved volume')
-    parser.add_argument('--cache-path', type=str, required=True, help='Path to save computed qkv features to.')
+    parser.add_argument('--cache-path', type=str, default=None, help='Path to save computed qkv features to.')
     parser.add_argument('--dino-model', type=str, choices=dino_archs, default=None, help='DINO model to use')
     parser.add_argument('--dino2-model', type=str, choices=dino2_archs, default=None, help='DINOv2 model to use')
     parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
-    parser.add_argument('--batch-size', type=int, default=2, help='Feed volume through network in batches')
+    parser.add_argument('--batch-size', type=int, default=1, help='Feed volume through network in batches')
     parser.add_argument('--feature-output-size', type=int, default=64, help='Produces a features map with aspect ratio of input volume with this value as y resolution. Only if --slice-along ALL')
     parser.add_argument('--cpu', action='store_true', help='Use CPU only')
     args = parser.parse_args()
@@ -238,6 +238,8 @@ if __name__ == '__main__':
         sys.exit(1)
 
     data_path = Path(args.data_path)
+    if not args.cache_path:
+        args.cache_path = data_path.parent / f'{data_path.stem}_{args.slice_along}_features{args.feature_output_size}.{data_path.suffix}'
     cache_path = Path(args.cache_path)
 
     if not data_path.exists():
