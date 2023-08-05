@@ -61,6 +61,8 @@ def sample_features3d(feat_vol, rel_coords, mode='nearest'):
         rel_coords = rel_coords.expand(feat_vol.size(0),-1,-1,-1)
     rel_coords.unsqueeze_(-2) # Make 5D
     grid_idx = rel_coords.flip(dims=(-1,)).to(feat_vol.dtype).to(feat_vol.device) # (1, 1, C, A, 3)
+    # print('sample_features3d: feat_vol:', make_5d(feat_vol).shape, 'grid_idx:', grid_idx.shape)
+    # Maybe do make_5d(grid_idx) in the line below
     feats = F.grid_sample(make_5d(feat_vol), grid_idx, mode=mode, align_corners=False)
     # (M, F, C*A, K, 1) -> (M, C, A, F)
     return feats.squeeze(-1).permute(0,2,3,1).contiguous()
