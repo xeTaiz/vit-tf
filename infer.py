@@ -105,8 +105,6 @@ def _noop(x, **kwargs): return x
 
 def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, slice_along='z', return_keys=['q', 'k', 'v'], dev=torch.device('cpu'), typ=torch.float32):
     if isinstance(return_keys, str): return_keys = [return_keys]
-    model = model.to(dev)
-    model.eval()
     feat_out = []
     def hook_fn_forward_qkv(module, input, output):
         feat_out.append(output.cpu().half())
@@ -150,16 +148,15 @@ def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, s
     # forward pass
     with torch.cuda.amp.autocast(enabled=True, dtype=typ):
         with torch.no_grad():
-            im_in = image.to(dev)
+            im_in = image
             for batch in torch.arange(im_in.size(0)).split(batch_size):
-                _ = model(F.interpolate(im_in[batch], size=im_sz, mode='nearest'))
+                _ = model(F.interpolate(im_in[batch], size=im_sz, mode='nearest').to(dev))
 
     # Dimensions
     nh = model._modules["blocks"][-1]._modules["attn"].num_heads
     nb_im = image.size(0) # Batch sizemonitor
     f_sz = im_sz[0] // patch_size , im_sz[1] // patch_size
 
-    del model
     merged_feats = torch.cat(feat_out)
     print('merged_feats:', merged_feats.shape, merged_feats.dtype, merged_feats.device)
     nb_tokens = merged_feats.shape[1]
@@ -214,6 +211,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=1, help='Feed volume through network in batches')
     parser.add_argument('--feature-output-size', type=int, default=64, help='Produces a features map with aspect ratio of input volume with this value as y resolution. Only if --slice-along ALL')
     parser.add_argument('--cpu', action='store_true', help='Use CPU only')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing cache files')
     args = parser.parse_args()
 
     dev = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -243,6 +241,9 @@ if __name__ == '__main__':
     if not args.cache_path:
         args.cache_path = data_path.parent / f'{data_path.stem}_{dino_model}_{args.slice_along}_features{args.feature_output_size}{data_path.suffix}'
     cache_path = Path(args.cache_path)
+    if cache_path.exists() and not args.overwrite:
+        print(f'Cache file already exists: {cache_path}. Use --overwrite to overwrite.')
+        sys.exit(1)
 
     if not data_path.exists():
         print(f'Invalid argument for --data-path (File does not exist): {args.data_path}')
@@ -279,13 +280,13 @@ if __name__ == '__main__':
         print(f'Input image size: {im_sz}')
 
         # Compute Features
-        model = dino_model_fn(dino_model)
+        model = dino_model_fn(dino_model).to(dev).eval()
         if args.slice_along in ['x', 'y', 'z']:
             qkv = compute_qkv(vol, model, patch_size, im_sz, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
         elif args.slice_along == 'all':
             qkv = defaultdict(float)
             avg_pool = torch.nn.AdaptiveAvgPool3d(output_size=feat_out_sz)
-            for ax in ['x', 'y', 'z']:
+            for ax in ['z', 'y', 'x']:
                 for k,v in compute_qkv(vol, model, patch_size, im_sz, pool_fn=avg_pool, batch_size=args.batch_size, return_keys='k', slice_along=ax, dev=dev, typ=typ).items():
                     qkv[k] += v.cpu().squeeze().half()
                     print(k, ':', qkv[k].shape)
