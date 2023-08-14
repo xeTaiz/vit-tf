@@ -101,6 +101,26 @@ def resample_topk(feat_vol, sims, K=8, similarity_exponent=2.0, feature_sampling
     print('resample_topk() sims:', sims.shape)
     return sims.mean(dim=3).to(feat_vol.dtype).to(feat_vol.device)
 
+def take_most_dissimilar(features, num_prototypes=35, measure='cosine'):
+    ''' Takes the most dissimilar features from the given `features` (N, F)
+        Args:
+            features (Tensor): Shape (N, F)
+            num_prototypes (int): Number of prototypes to take
+            measure (str): One of: cosine, euclidean
+        Returns:
+            Tensor: Shape (num_prototypes, F)
+    '''
+    if features.size(0) <= num_prototypes: return features
+    if measure == 'cosine':
+        dist = 1 - F.cosine_similarity(features.unsqueeze(0), features.unsqueeze(1), dim=-1).squeeze(0).mean(0)  # (N,)
+    elif measure == 'euclidean':
+        dist = torch.cdist(features.unsqueeze(0), features.unsqueeze(0)).squeeze(0).mean(0)  # (N,)
+    else:
+        raise ValueError(f'Unknown measure: {measure}')
+    largest_dists, selected = torch.topk(dist, num_prototypes, largest=True, sorted=False)
+    print(f'Smallest distances (min: {largest_dists.min().item():.4f} avg: {largest_dists.mean().item():.4f}) vs average distance ({dist.mean().item():.4f})')
+    return features[selected]
+
 def _noop(x, **kwargs): return x
 
 def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, slice_along='z', return_keys=['q', 'k', 'v'], dev=torch.device('cpu'), typ=torch.float32):
@@ -207,7 +227,7 @@ if __name__ == '__main__':
     parser.add_argument('--cache-path', type=str, default=None, help='Path to save computed qkv features to.')
     parser.add_argument('--dino-model', type=str, choices=dino_archs, default=None, help='DINO model to use')
     parser.add_argument('--dino2-model', type=str, choices=dino2_archs, default=None, help='DINOv2 model to use')
-    parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='z', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
+    parser.add_argument('--slice-along', type=str, choices=['x', 'y', 'z', 'all'], default='all', help='Along which axis to slice volume, as it is fed slice-wise to DINO')
     parser.add_argument('--batch-size', type=int, default=1, help='Feed volume through network in batches')
     parser.add_argument('--feature-output-size', type=int, default=64, help='Produces a features map with aspect ratio of input volume with this value as y resolution. Only if --slice-along ALL')
     parser.add_argument('--cpu', action='store_true', help='Use CPU only')
