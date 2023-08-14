@@ -107,9 +107,10 @@ if __name__ == '__main__':
 
     # Load data
     dir = Path(args.data)
+    feat_fn = list(filter(lambda p: 'dino_features' in str(p), dir.iterdir()))[0]
     volume =      np.load(dir / 'volume.npy', allow_pickle=True).astype(np.float32)
     labels =      np.load(dir / 'labels.npy', allow_pickle=True)
-    features =    np.load(dir / 'dino_features.npy', allow_pickle=True)[()]
+    features =    np.load(dir / feat_fn, allow_pickle=True)[()]
     volume = np.flip(volume, axis=-3).copy()
     labels = np.flip(labels, axis=-3).copy()
     if isinstance(features, dict):

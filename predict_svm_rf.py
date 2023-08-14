@@ -13,6 +13,12 @@ from pprint import pprint
 from infer import make_3d, make_4d, make_5d, sample_features3d
 from compare_feat_sampling import sample_uniform, sample_surface, sample_both
 
+sampling_modes = {
+    'uniform': sample_uniform,
+    'surface': sample_surface,
+    'both': sample_both,
+}
+
 def get_gradient_magnitude(volume):
     ''' Computes central differences of volume.
     Args:
@@ -75,13 +81,16 @@ if __name__ == '__main__':
     parser = ArgumentParser("Predict Segmentation using SVM and Random Forests")
     parser.add_argument('--data', type=str, required=True, help='Path to volume and annotation data')
     parser.add_argument('--svm-kernel', type=str, choices=['linear', 'poly', 'rgb', 'sigmoid', 'precomputed'], default='rbf', help='SVM Kernel function, see scikit-learn docs')
+    parser.add_argument('--load-sims', action='store_true', help='Load similarities from file')
     parser.add_argument('--num-samples', type=float, default=0.0, help='Number of samples to use for training, 0 to use annotations.npy')
+    parser.add_argument('--sampling-mode', type=str, choices=['uniform', 'surface', 'both'], default='uniform', help='Sampling mode')
     args = parser.parse_args()
 
     dir = Path(args.data)
     volume      = np.load(dir / 'volume.npy',      allow_pickle=True)  # (W,H,D,1)
     labels      = np.load(dir / 'labels.npy',      allow_pickle=True)  # (W,H,D)
 
+    draw_samples = sampling_modes[args.sampling_mode]
     if args.num_samples == 0.0:
         annotations = np.load(dir / 'annotations.npy', allow_pickle=True)[()]  # { classname: (N, 3) }
     elif args.num_samples > 1.0:
@@ -89,13 +98,13 @@ if __name__ == '__main__':
         for i in range(1, labels.max()+1):
             mask = torch.as_tensor(labels == i)
             N_SAMPLES = min(int(args.num_samples), mask.sum().item())
-            annotations[f'ntf{i}'] = sample_uniform(mask, N_SAMPLES, thin_to_reasonable=True)
+            annotations[f'ntf{i}'] = draw_samples(mask, N_SAMPLES, thin_to_reasonable=True)
     elif args.num_samples > 0.0:
         annotations = {}
         for i in range(1, labels.max()+1):
             mask = torch.as_tensor(labels == i)
             N_SAMPLES = int(args.num_samples * mask.sum().item())
-            annotations[f'ntf{i}'] = sample_uniform(mask, N_SAMPLES, thin_to_reasonable=True)
+            annotations[f'ntf{i}'] = draw_samples(mask, N_SAMPLES, thin_to_reasonable=True)
     else:
         raise Exception(f'Invalid value for --num-samples: {args.num_samples}')
 
@@ -104,7 +113,7 @@ if __name__ == '__main__':
     print('Annotations: ', {k: v.shape for k, v in annotations.items()})
     print('Adding background annotations')
     BG_SAMPLES = max(list(map(lambda v: v.size(0), annotations.values()))) if args.num_samples != 0.0 else 128
-    annotations['background'] = sample_uniform(labels == 0, BG_SAMPLES, thin_to_reasonable=True)
+    annotations['background'] = draw_samples(labels == 0, BG_SAMPLES, thin_to_reasonable=True)
 
     print('Annotations: ', {k: v.shape for k, v in annotations.items()})
     # input has 11-dim features containing intensity, grad mag, intensities of 6 neighbors and voxel coordinate, normalized to mean 0 std 1
@@ -123,7 +132,7 @@ if __name__ == '__main__':
     t_svm_2 = time.time()
     print('SVM fit time:', t_svm_1 - t_svm_0)
     print('SVM predict time:', t_svm_2 - t_svm_1)
-    np.save(dir / f'svm_pred{args.num_samples}.npy', svm_pred.reshape(labels.shape))
+    np.save(dir / f'svm_pred{args.num_samples}{args.sampling_mode}.npy', svm_pred.reshape(labels.shape))
     prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), svm_pred, average=None)
     cm = confusion_matrix(labels.reshape(-1), svm_pred)
     acc = cm.diagonal() / cm.sum(axis=1)
@@ -140,7 +149,7 @@ if __name__ == '__main__':
     }
     print('SVM Metrics:')
     pprint(svm_metrics)
-    with open(dir / f'svm_metrics{args.num_samples}.json', 'w') as f:
+    with open(dir / f'svm_metrics{args.num_samples}{args.sampling_mode}.json', 'w') as f:
         json.dump(svm_metrics, f)
 
     clf = RandomForestClassifier(n_estimators=32)
@@ -151,7 +160,7 @@ if __name__ == '__main__':
     t_rf_2 = time.time()
     print('RF fit time:', t_rf_1 - t_rf_0)
     print('RF predict time:', t_rf_2 - t_rf_1)
-    np.save(dir / f'rf_pred{args.num_samples}.npy', rf_pred.reshape(labels.shape))
+    np.save(dir / f'rf_pred{args.num_samples}{args.sampling_mode}.npy', rf_pred.reshape(labels.shape))
     prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), rf_pred, average=None)
     cm = confusion_matrix(labels.reshape(-1), rf_pred)
     acc = cm.diagonal() / cm.sum(axis=1)
@@ -168,5 +177,5 @@ if __name__ == '__main__':
     }
     print('RF Metrics:')
     pprint(rf_metrics)
-    with open(dir / f'rf_metrics{args.num_samples}.json', 'w') as f:
+    with open(dir / f'rf_metrics{args.num_samples}{args.sampling_mode}.json', 'w') as f:
         json.dump(rf_metrics, f)
