@@ -6,3 +6,4 @@ slurm_log/
 figures_*
 *.png
 similarity_images/
+.ipynb_checkpoints/
