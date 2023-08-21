@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from torchvision.transforms.functional import normalize
 from collections import defaultdict
 
 def make_nd(t, n):
@@ -208,6 +207,7 @@ def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, s
 if __name__ == '__main__':
     dino_archs = ['vits16', 'vits8', 'vitb16', 'vitb8']
     dino2_archs = ['vits14', 'vitb14', 'vitl14', 'vitg14']
+    from torchvision.transforms.functional import normalize
     from pathlib import Path
     from argparse import ArgumentParser
     import os, sys
