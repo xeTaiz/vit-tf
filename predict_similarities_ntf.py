@@ -117,10 +117,14 @@ if __name__ == '__main__':
         print(f'Found multiple features in {dir}. Using largest one {feat_fn.name}.')
 
     volume =      np.load(dir / 'volume.npy', allow_pickle=True).astype(np.float32)
-    labels =      np.load(dir / 'labels.npy', allow_pickle=True)
+    if (dir / 'labels.npy').exists():
+        labels =      np.load(dir / 'labels.npy', allow_pickle=True)[()]
+        labels = np.flip(labels, axis=-3).copy()
+    else:
+        assert args.num_samples == 0.0, 'Cannot sample labels if they are not provided'
+        labels = None
     features =    np.load(dir / feat_fn, allow_pickle=True)[()]
     volume = np.flip(volume, axis=-3).copy()
-    labels = np.flip(labels, axis=-3).copy()
     if isinstance(features, dict):
         features = torch.as_tensor(features['k']).float().squeeze()
     else:
@@ -189,13 +193,9 @@ if __name__ == '__main__':
     print('Pred:', pred.shape, pred.min(), pred.max())
     print('NTF fit time:', t1 - t0)
     print('NTF predict time:', t2 - t1)
-    # Slicerei
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(1,2, dpi=200)
-    ax[0].imshow(pred[:,:,420])
-    ax[1].imshow(labels[:,:,420])
-    fig.savefig('testonerhnfdsdf.png')
 
+    if labels is None:
+        exit(0)
     pred = pred.reshape(-1)
     ic(pred)
     ic(labels.reshape(-1))
