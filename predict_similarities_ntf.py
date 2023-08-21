@@ -92,9 +92,11 @@ def compute_similarities(volume, features, annotations, bilateral_solver=False):
                 csim = apply_bilateral_solver3d(make_4d(csim), cvol.expand(3, -1,-1,-1), grid_params=bls_params)
                 sim = write_crop_into(sim, csim, mima)
                 print('Wrote crop into original similarity map', csim.shape, '->', sim.shape)
-                similarities[k] = (255.0 / (sim.quantile(q=0.9999)) * sim).cpu().to(torch.uint8).squeeze()
+                quant = 0.99 * ssim.max() # ssim.quantile(q=0.99)
+                similarities[k] = (255.0 / quant * sim).cpu().to(torch.uint8).squeeze()
             else:
-                similarities[k] = (255.0 / (sim.quantile(q=0.9999)) * sim).cpu().to(torch.uint8).squeeze()
+                quant = 0.99 * ssim.max() # ssim.quantile(q=0.99)
+                similarities[k] = (255.0 / quant * sim).cpu().to(torch.uint8).squeeze()
                 similarities[k] = F.interpolate(make_5d(similarities[k]), sim_shape, mode='nearest').squeeze()
         return similarities
 
