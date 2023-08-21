@@ -5,5 +5,5 @@ git+https://github.com/xeTaiz/torchvtk@master#egg=torchvtk
 wandb
 scikit-learn
 matplotlib
-torchmetrics==0.10.2
+# torchmetrics==0.10.2
 icecream
