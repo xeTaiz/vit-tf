@@ -124,7 +124,7 @@ if __name__ == '__main__':
     else:
         print(f'Inferring for {dir} using sampling mode {args.sampling_mode} and {args.num_samples} samples')
 
-    feat_fns = list(filter(lambda p: 'features' in str(p) and not 'pred' in str(p), dir.iterdir()))
+    feat_fns = list(filter(lambda p: 'features' in str(p) and 'pred' not in str(p), dir.iterdir()))
     if len(feat_fns) == 0:
         raise ValueError(f'No features found in {dir}')
     elif len(feat_fns) == 1:
@@ -180,7 +180,7 @@ if __name__ == '__main__':
         similarities = {k: torch.as_tensor(v) for k,v in np.load(dir / 'similarities.npy', allow_pickle=True)[()].items()}
     else:
         if torch.cat(list(annotations.values())).size(0) > 10000:
-            similarities = {k: compute_similarities(volume, features.to(device=dev, dtype=typ), {k: v}, bilateral_solver=args.bilateral_solver) for k,v in annotations.items()}
+            similarities = {k: compute_similarities(volume, features.to(device=dev, dtype=typ), {k: v}, bilateral_solver=args.bilateral_solver)[k] for k,v in annotations.items()}
         else:
             similarities = compute_similarities(volume, features.to(device=dev, dtype=typ), annotations, bilateral_solver=args.bilateral_solver)
         similarities = {k: v.cpu().float() for k,v in similarities.items()}
