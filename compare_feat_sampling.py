@@ -21,8 +21,6 @@ def sample_surface(vol, n_samples, dist_from_surface=4):
     stel2 = generate_binary_structure(rank=3, connectivity=1)
     outer = binary_erosion(vol, stel1)
     inner = binary_erosion(outer, stel2)
-    print('outer', outer.sum(), tuple(map(lambda c: (c.min(), c.max()), outer.nonzero())))
-    print('inner', inner.sum(), tuple(map(lambda c: (c.min(), c.max()), inner.nonzero())))
 
     surface_idxs = torch.as_tensor(np.logical_xor(inner, outer)).nonzero()
     if surface_idxs.size(0) > n_samples:
