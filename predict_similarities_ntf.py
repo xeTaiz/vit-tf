@@ -59,7 +59,10 @@ def compute_similarities(volume, features, annotations, bilateral_solver=False):
         qf = sample_features3d(features, rel_coords, mode='bilinear').squeeze(0)  # (1, A, F)
 
         print(f'Features: {features.shape}, qf: {qf.shape}')
-        sims = torch.einsum('fwhd,caf->cawhd', (features, qf)).squeeze(1)
+        if len(annotations) == 1 and list(annotations.values())[0].size(0) > 1024:
+            sims = torch.einsum('fwhd,caf->cwhd', (features, qf)).squeeze(1).unsqueeze(-4) / qf.size(1)
+        else:
+            sims = torch.einsum('fwhd,caf->cawhd', (features, qf)).squeeze(1)
 
         lr_abs_coords = torch.round((rel_coords * 0.5 + 0.5) * (torch.tensor([*sims.shape[-3:]]).to(dev).to(typ) - 1.0)).long()  # (A, 3)
         lr_abs_coords = split_into_classes(make_3d(lr_abs_coords))  # (1, A, 3) -> {NTF_ID: (1, a, 3)}
@@ -103,8 +106,13 @@ if __name__ == '__main__':
     parser.add_argument('--load-sims', action='store_true', help='Load similarities from file')
     parser.add_argument('--num-samples', type=float, default=0.0, help='Number of samples to use for each NTF')
     parser.add_argument('--sampling-mode', type=str, choices=['uniform', 'surface', 'both'], default='both', help='Sampling mode')
+    parser.add_argument('--gpu', action='store_true', help='Use GPU')
     args = parser.parse_args()
 
+    if args.gpu and torch.cuda.is_available():
+        dev, typ = torch.device('cuda'), torch.float16
+    else:
+        dev, typ = torch.device('cpu'), torch.float32
     # Load data
     dir = Path(args.data)
     if args.num_samples == 0.0:
@@ -171,7 +179,11 @@ if __name__ == '__main__':
     if args.load_sims:
         similarities = {k: torch.as_tensor(v) for k,v in np.load(dir / 'similarities.npy', allow_pickle=True)[()].items()}
     else:
-        similarities = compute_similarities(volume, features, annotations, bilateral_solver=args.bilateral_solver)
+        if torch.cat(list(annotations.values())).size(0) > 10000:
+            similarities = {k: compute_similarities(volume, features.to(device=dev, dtype=typ), {k: v}, bilateral_solver=args.bilateral_solver) for k,v in annotations.items()}
+        else:
+            similarities = compute_similarities(volume, features.to(device=dev, dtype=typ), annotations, bilateral_solver=args.bilateral_solver)
+        similarities = {k: v.cpu().float() for k,v in similarities.items()}
     t2 = time.time()
     # Compare to similarities on disk
     # similarities_exported = np.load(dir / 'similarities.npy', allow_pickle=True)[()]
