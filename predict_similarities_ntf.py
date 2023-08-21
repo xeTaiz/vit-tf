@@ -70,9 +70,9 @@ def compute_similarities(volume, features, annotations, bilateral_solver=False):
             if bilateral_solver:
                 print('Reducing & Solving ', k, sim.shape)
                 bls_params = {
-                    'sigma_spatial': 5,
-                    'sigma_chroma':3,
-                    'sigma_luma': 3,
+                    'sigma_spatial': 7,
+                    'sigma_chroma':5,
+                    'sigma_luma': 5,
                 }
                 vol = F.interpolate(make_5d(torch.as_tensor(volume)), sim_shape, mode='trilinear').squeeze()
                 # vol = make_4d(vol.squeeze()).flip(-3)
