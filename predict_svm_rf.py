@@ -69,10 +69,15 @@ def sample_train_data(features, labels, annotations):
     '''
     sampled_features = []
     sampled_labels = []
+    i = 0
     for classname, annotation in annotations.items():
-        rel_coords = make_3d((annotation + 0.5) / torch.tensor(labels.shape[-3:]))
+        rel_coords = make_3d((annotation + 0.5) / torch.tensor(features.shape[-3:]))
         sampled_features.append(sample_features3d(features, rel_coords).squeeze(0).squeeze(0))
-        sampled_labels.append(sample_features3d(make_4d(labels), rel_coords).squeeze(0).squeeze(0).squeeze(-1))
+        if labels is not None:
+            sampled_labels.append(sample_features3d(make_4d(labels), rel_coords).squeeze(0).squeeze(0).squeeze(-1))
+        else:
+            sampled_labels.append(torch.ones(rel_coords.size(1), dtype=torch.uint8) * i)
+        i += 1
     return torch.cat(sampled_features, dim=0).numpy(), torch.cat(sampled_labels, dim=0).byte().numpy()
 
 
@@ -93,7 +98,11 @@ if __name__ == '__main__':
         print(f'Inferring for {dir} using sampling mode {args.sampling_mode} and {args.num_samples} samples')
 
     volume      = np.load(dir / 'volume.npy',      allow_pickle=True)  # (W,H,D,1)
-    labels      = np.load(dir / 'labels.npy',      allow_pickle=True)  # (W,H,D)
+    if (dir / 'labels.npy').exists():
+        labels      = np.load(dir / 'labels.npy',      allow_pickle=True)  # (W,H,D)
+    else:
+        assert args.num_samples == 0.0, 'Cannot sample labels if they are not provided'
+        labels = None
 
     draw_samples = sampling_modes[args.sampling_mode]
     if args.num_samples == 0.0:
@@ -114,12 +123,20 @@ if __name__ == '__main__':
         raise Exception(f'Invalid value for --num-samples: {args.num_samples}')
 
     BG_SAMPLES = max(list(map(lambda v: v.size(0), annotations.values()))) if args.num_samples != 0.0 else 128
-    annotations['background'] = draw_samples(labels == 0, BG_SAMPLES, thin_to_reasonable=True)
+    if labels is not None:
+        annotations['background'] = draw_samples(labels == 0, BG_SAMPLES, thin_to_reasonable=True)
+    else:  # Sample from border
+        bg_samples = torch.ones(volume.shape[-3:], dtype=torch.bool)
+        bg_samples[4:-4,4:-4,4:-4] = False
+        annotations['background'] = draw_samples(bg_samples, BG_SAMPLES, thin_to_reasonable=True)
 
     # input has 11-dim features containing intensity, grad mag, intensities of 6 neighbors and voxel coordinate, normalized to mean 0 std 1
-    features = compose_features(torch.from_numpy(volume).float())
+    features = compose_features(torch.from_numpy(volume.astype(np.float32)))
 
-    train_X, train_y = sample_train_data(features, torch.from_numpy(labels).float(), annotations)
+    if labels is not None:
+        train_X, train_y = sample_train_data(features, torch.from_numpy(labels).float(), annotations)
+    else:
+        train_X, train_y = sample_train_data(features, None, annotations)
     # input to fit must be (N, F)
     # labels to fit must be (N,)
     if not (dir / f'svm_metrics{args.num_samples}{args.sampling_mode}.json').exists():
@@ -131,25 +148,26 @@ if __name__ == '__main__':
         t_svm_2 = time.time()
         print('SVM fit time:', t_svm_1 - t_svm_0)
         print('SVM predict time:', t_svm_2 - t_svm_1)
-        np.save(dir / f'svm_pred{args.num_samples}{args.sampling_mode}.npy', svm_pred.reshape(labels.shape))
-        prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), svm_pred, average=None)
-        cm = confusion_matrix(labels.reshape(-1), svm_pred)
-        acc = cm.diagonal() / cm.sum(axis=1)
-        iou = jaccard_score(labels.reshape(-1), svm_pred, average=None)
-        svm_metrics = {
-            'accuracy': dict(zip(annotations.keys(), acc.tolist())),
-            'precision': dict(zip(annotations.keys(), prec.tolist())),
-            'recall': dict(zip(annotations.keys(), rec.tolist())),
-            'f1': dict(zip(annotations.keys(), f1.tolist())),
-            'iou': dict(zip(annotations.keys(), iou.tolist())),
-            'confusion_matrix': dict(zip(annotations.keys(), cm.tolist())),
-            'fit_time': t_svm_1 - t_svm_0,
-            'predict_time': t_svm_2 - t_svm_1,
-        }
-        print('SVM Metrics:')
-        pprint(svm_metrics)
-        with open(dir / f'svm_metrics{args.num_samples}{args.sampling_mode}.json', 'w') as f:
-            json.dump(svm_metrics, f)
+        np.save(dir / f'svm_pred{args.num_samples}{args.sampling_mode}.npy', svm_pred.reshape(volume.shape))
+        if labels is not None:
+            prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), svm_pred, average=None)
+            cm = confusion_matrix(labels.reshape(-1), svm_pred)
+            acc = cm.diagonal() / cm.sum(axis=1)
+            iou = jaccard_score(labels.reshape(-1), svm_pred, average=None)
+            svm_metrics = {
+                'accuracy': dict(zip(annotations.keys(), acc.tolist())),
+                'precision': dict(zip(annotations.keys(), prec.tolist())),
+                'recall': dict(zip(annotations.keys(), rec.tolist())),
+                'f1': dict(zip(annotations.keys(), f1.tolist())),
+                'iou': dict(zip(annotations.keys(), iou.tolist())),
+                'confusion_matrix': dict(zip(annotations.keys(), cm.tolist())),
+                'fit_time': t_svm_1 - t_svm_0,
+                'predict_time': t_svm_2 - t_svm_1,
+            }
+            print('SVM Metrics:')
+            pprint(svm_metrics)
+            with open(dir / f'svm_metrics{args.num_samples}{args.sampling_mode}.json', 'w') as f:
+                json.dump(svm_metrics, f)
 
     if not (dir / f'rf_metrics{args.num_samples}{args.sampling_mode}.json').exists():
         clf = RandomForestClassifier(n_estimators=32)
@@ -160,22 +178,23 @@ if __name__ == '__main__':
         t_rf_2 = time.time()
         print('RF fit time:', t_rf_1 - t_rf_0)
         print('RF predict time:', t_rf_2 - t_rf_1)
-        np.save(dir / f'rf_pred{args.num_samples}{args.sampling_mode}.npy', rf_pred.reshape(labels.shape))
-        prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), rf_pred, average=None)
-        cm = confusion_matrix(labels.reshape(-1), rf_pred)
-        acc = cm.diagonal() / cm.sum(axis=1)
-        iou = jaccard_score(labels.reshape(-1), rf_pred, average=None)
-        rf_metrics = {
-            'accuracy': dict(zip(annotations.keys(), acc.tolist())),
-            'precision': dict(zip(annotations.keys(), prec.tolist())),
-            'recall': dict(zip(annotations.keys(), rec.tolist())),
-            'f1': dict(zip(annotations.keys(), f1.tolist())),
-            'iou': dict(zip(annotations.keys(), iou.tolist())),
-            'confusion_matrix': dict(zip(annotations.keys(), cm.tolist())),
-            'fit_time': t_rf_1 - t_rf_0,
-            'predict_time': t_rf_2 - t_rf_1,
-        }
-        print('RF Metrics:')
-        pprint(rf_metrics)
-        with open(dir / f'rf_metrics{args.num_samples}{args.sampling_mode}.json', 'w') as f:
-            json.dump(rf_metrics, f)
+        np.save(dir / f'rf_pred{args.num_samples}{args.sampling_mode}.npy', rf_pred.reshape(volume.shape))
+        if labels is not None:
+            prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), rf_pred, average=None)
+            cm = confusion_matrix(labels.reshape(-1), rf_pred)
+            acc = cm.diagonal() / cm.sum(axis=1)
+            iou = jaccard_score(labels.reshape(-1), rf_pred, average=None)
+            rf_metrics = {
+                'accuracy': dict(zip(annotations.keys(), acc.tolist())),
+                'precision': dict(zip(annotations.keys(), prec.tolist())),
+                'recall': dict(zip(annotations.keys(), rec.tolist())),
+                'f1': dict(zip(annotations.keys(), f1.tolist())),
+                'iou': dict(zip(annotations.keys(), iou.tolist())),
+                'confusion_matrix': dict(zip(annotations.keys(), cm.tolist())),
+                'fit_time': t_rf_1 - t_rf_0,
+                'predict_time': t_rf_2 - t_rf_1,
+            }
+            print('RF Metrics:')
+            pprint(rf_metrics)
+            with open(dir / f'rf_metrics{args.num_samples}{args.sampling_mode}.json', 'w') as f:
+                json.dump(rf_metrics, f)
