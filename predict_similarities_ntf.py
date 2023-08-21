@@ -116,7 +116,7 @@ if __name__ == '__main__':
     else:
         print(f'Inferring for {dir} using sampling mode {args.sampling_mode} and {args.num_samples} samples')
 
-    feat_fns = list(filter(lambda p: 'dino_features' in str(p), dir.iterdir()))
+    feat_fns = list(filter(lambda p: 'features' in str(p), dir.iterdir()))
     if len(feat_fns) == 0:
         raise ValueError(f'No features found in {dir}')
     elif len(feat_fns) == 1:
