@@ -171,17 +171,17 @@ def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, s
     if 'q' in return_keys:
         q = qkv[0].transpose(1, 2).view(nb_im, nb_tokens, -1)
         q = q[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-        out['q'] = pool_fn(q.permute(*permute_out)).cpu()
+        out['q'] = pool_fn(q.permute(*permute_out).to(dev)).cpu()
         del q
     if 'k' in return_keys:
         k = qkv[1].transpose(1, 2).view(nb_im, nb_tokens, -1)
         k = k[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-        out['k'] = pool_fn(k.permute(*permute_out)).cpu()
+        out['k'] = pool_fn(k.permute(*permute_out).to(dev)).cpu()
         del k
     if 'v' in return_keys:
         v = qkv[2].transpose(1, 2).view(nb_im, nb_tokens, -1)
         v = v[:, 1:].view(nb_im, f_sz[0], f_sz[1], -1).permute(0, 3, 1, 2)
-        out['v'] = pool_fn(v.permute(*permute_out)).cpu()
+        out['v'] = pool_fn(v.permute(*permute_out).to(dev)).cpu()
         del v
     return out
 
@@ -288,7 +288,7 @@ if __name__ == '__main__':
             avg_pool = torch.nn.AdaptiveAvgPool3d(output_size=feat_out_sz)
             for ax in ['z', 'y', 'x']:
                 for k,v in compute_qkv(vol, model, patch_size, im_sz, pool_fn=avg_pool, batch_size=args.batch_size, return_keys='k', slice_along=ax, dev=dev, typ=typ).items():
-                    qkv[k] += v.cpu().squeeze().half()
+                    qkv[k] = (torch.as_tensor(qkv[k]).to(dev) + v.to(dev).squeeze().half()).cpu()
                     print(k, ':', qkv[k].shape)
         else:
             raise Exception(f'Invalid argument for --slice-along: {args.slice_along}. Must be x,y,z or all')
