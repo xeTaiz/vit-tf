@@ -102,12 +102,20 @@ if __name__ == '__main__':
     parser.add_argument('--bilateral-solver', action='store_true', help='Use bilateral solver')
     parser.add_argument('--load-sims', action='store_true', help='Load similarities from file')
     parser.add_argument('--num-samples', type=float, default=0.0, help='Number of samples to use for each NTF')
-    parser.add_argument('--sampling-mode', type=str, choices=['uniform', 'surface', 'both'], default='uniform', help='Sampling mode')
+    parser.add_argument('--sampling-mode', type=str, choices=['uniform', 'surface', 'both'], default='both', help='Sampling mode')
     args = parser.parse_args()
 
     # Load data
     dir = Path(args.data)
-    feat_fn = list(filter(lambda p: 'dino_features' in str(p), dir.iterdir()))[0]
+    feat_fns = list(filter(lambda p: 'dino_features' in str(p), dir.iterdir()))
+    if len(feat_fns) == 0:
+        raise ValueError(f'No features found in {dir}')
+    elif len(feat_fns) == 1:
+        feat_fn = feat_fns[0]
+    else:
+        feat_fn = sorted(feat_fns, key=lambda p: p.stat().st_size)[-1]
+        print(f'Found multiple features in {dir}. Using largest one {feat_fn.name}.')
+
     volume =      np.load(dir / 'volume.npy', allow_pickle=True).astype(np.float32)
     labels =      np.load(dir / 'labels.npy', allow_pickle=True)
     features =    np.load(dir / feat_fn, allow_pickle=True)[()]
