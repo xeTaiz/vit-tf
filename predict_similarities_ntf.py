@@ -107,6 +107,15 @@ if __name__ == '__main__':
 
     # Load data
     dir = Path(args.data)
+    if args.num_samples == 0.0:
+        args.sampling_mode = 'annotated'
+    bls_str = 'bls' if args.bilateral_solver else ''
+    if (dir / f'ntf_pred{args.num_samples}{args.sampling_mode}{bls_str}.npy').exists():
+        print(f'Already inferred NTF preds for {dir} using sampling mode {args.sampling_mode} and {args.num_samples} samples')
+        exit(0)
+    else:
+        print(f'Inferring for {dir} using sampling mode {args.sampling_mode} and {args.num_samples} samples')
+
     feat_fns = list(filter(lambda p: 'dino_features' in str(p), dir.iterdir()))
     if len(feat_fns) == 0:
         raise ValueError(f'No features found in {dir}')
@@ -186,7 +195,6 @@ if __name__ == '__main__':
         pred[mask] = i+1
         pred_vals[mask] = sim[mask]
     pred = pred.cpu().numpy().astype(np.uint8)
-    bls_str = 'bls' if args.bilateral_solver else ''
     np.save(dir / f'ntf_pred{args.num_samples}{args.sampling_mode}{bls_str}.npy', pred)
     if tuple(pred.shape[-3:]) != tuple(volume.shape[-3:]):
         pred = F.interpolate(make_5d(torch.as_tensor(pred)), tuple(volume.shape[-3:]), mode='nearest').squeeze().numpy()
