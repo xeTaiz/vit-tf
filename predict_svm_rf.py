@@ -78,7 +78,9 @@ def sample_train_data(features, labels, annotations):
     sampled_features = []
     sampled_labels = []
     i = 0
-    for classname, annotation in annotations.items():
+    sorted_keys = sorted(annotations.keys())
+    for classname in sorted_keys:
+        annotation = annotations[classname]
         rel_coords = make_3d((annotation.float() + 0.5) / torch.tensor(features.shape[-3:])) * 2.0 - 1.0
         sampled_features.append(sample_features3d(features, rel_coords).squeeze(0).squeeze(0))
         if labels is not None:
