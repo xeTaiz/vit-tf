@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from sklearn.metrics import precision_recall_fscore_support, jaccard_score, confusion_matrix
+from sklearn.metrics import precision_recall_fscore_support, jaccard_score, confusion_matrix, accuracy_score
 import time, json
 
 from infer import make_3d, make_4d, make_5d, sample_features3d, norm_minmax
@@ -19,6 +19,7 @@ sampling_modes = {
     'uniform': sample_uniform,
     'surface': sample_surface,
     'both': sample_both,
+    'annotated': lambda *args, **kwargs: None
 }
 
 def compute_similarities(volume, features, annotations, bilateral_solver=False):
@@ -201,7 +202,7 @@ if __name__ == '__main__':
     pred = torch.zeros_like(sims[0])
     pred_vals = torch.zeros_like(sims[0])
     ct_org_names = ['liver', 'bladder', 'lung', 'kidney', 'bone']
-    ct_org_thresholds = [0.615, 0.93, 0.5, 0.85, 0.6]
+    ct_org_thresholds = [0.486, 0.264, 0.236, 0.68, 0.291]
     from itertools import count
     min_sim = int(0.6 * 255)
     for i, n, sim in zip(count(), ct_org_names, sims):
@@ -223,15 +224,19 @@ if __name__ == '__main__':
     ic(labels.reshape(-1))
     prec, rec, f1, _ = precision_recall_fscore_support(labels.reshape(-1), pred, average=None)
     cm = confusion_matrix(labels.reshape(-1), pred)
-    acc = cm.diagonal() / cm.sum(axis=1)
+    acc = accuracy_score(labels.reshape(-1), pred)
     iou = jaccard_score(labels.reshape(-1), pred, average=None)
     label_names = ['background'] + list(annotations.keys())
     ntf_metrics = {
-        'accuracy': dict(zip(label_names, acc.tolist())),
+        'mAcc': acc,
         'precision': dict(zip(label_names, prec.tolist())),
+        'mPrec': prec.mean(),
         'recall': dict(zip(label_names, rec.tolist())),
+        'mRec': rec.mean(),
         'f1': dict(zip(label_names, f1.tolist())),
+        'mF1': f1.mean(),
         'iou': dict(zip(label_names, iou.tolist())),
+        'mIoU': iou.mean(),
         'confusion_matrix': dict(zip(label_names, cm.tolist())),
         'fit_time': t1 - t0,
         'predict_time': t2 - t1,
