@@ -93,10 +93,10 @@ def compute_similarities(volume, features, annotations, bilateral_solver=False):
                 csim = apply_bilateral_solver3d(make_4d(csim), cvol.expand(3, -1,-1,-1), grid_params=bls_params)
                 sim = write_crop_into(sim, csim, mima)
                 print('Wrote crop into original similarity map', csim.shape, '->', sim.shape)
-                quant = 0.99 * ssim.max() # ssim.quantile(q=0.99)
+                quant = 0.99 * sim.max() # ssim.quantile(q=0.99)
                 similarities[k] = (255.0 / quant * sim).cpu().to(torch.uint8).squeeze()
             else:
-                quant = 0.99 * ssim.max() # ssim.quantile(q=0.99)
+                quant = 0.99 * sim.max() # ssim.quantile(q=0.99)
                 similarities[k] = (255.0 / quant * sim).cpu().to(torch.uint8).squeeze()
                 similarities[k] = F.interpolate(make_5d(similarities[k]), sim_shape, mode='nearest').squeeze()
         return similarities
@@ -181,13 +181,17 @@ if __name__ == '__main__':
     t1 = t0
     if args.load_sims:
         similarities = {k: torch.as_tensor(v) for k,v in np.load(dir / 'similarities.npy', allow_pickle=True)[()].items()}
+        t2 = t1
     else:
         if torch.cat(list(annotations.values())).size(0) > 10000:
+            t1 = time.time()
             similarities = {k: compute_similarities(volume, features.to(device=dev, dtype=typ), {k: v}, bilateral_solver=args.bilateral_solver)[k] for k,v in annotations.items()}
+            t2 = time.time()
         else:
+            t1 = time.time()
             similarities = compute_similarities(volume, features.to(device=dev, dtype=typ), annotations, bilateral_solver=args.bilateral_solver)
+            t2 = time.time()
         similarities = {k: v.cpu().float() for k,v in similarities.items()}
-    t2 = time.time()
     # Compare to similarities on disk
     # similarities_exported = np.load(dir / 'similarities.npy', allow_pickle=True)[()]
     # for k in similarities.keys():
