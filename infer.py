@@ -302,7 +302,7 @@ if __name__ == '__main__':
         # Compute Features
         model = dino_model_fn(dino_model).to(dev).eval()
         if args.slice_along in ['x', 'y', 'z']:
-            qkv = compute_qkv(vol, model, patch_size, im_sz, batch_size=args.batch_size, slice_along=args.slice_along, dev=dev, typ=typ)
+            qkv = compute_qkv(vol, model, patch_size, im_sz, batch_size=args.batch_size, return_keys='k', slice_along=args.slice_along, dev=dev, typ=typ)
         elif args.slice_along == 'all':
             qkv = defaultdict(float)
             avg_pool = torch.nn.AdaptiveAvgPool3d(output_size=feat_out_sz)
