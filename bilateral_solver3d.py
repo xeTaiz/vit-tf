@@ -3,8 +3,6 @@ import numpy as np
 from scipy.sparse import csr_matrix, diags
 from scipy.sparse.linalg import cg
 
-import icecream as ic
-from domesutils import *
 from infer import make_5d
 
 __all__ = ['apply_bilateral_solver3d']
