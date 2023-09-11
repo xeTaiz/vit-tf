@@ -5,5 +5,8 @@ __pycache__/
 slurm_log/
 figures_*
 *.png
+*.json
 similarity_images/
 .ipynb_checkpoints/
+screenshots/
+render_videos/
