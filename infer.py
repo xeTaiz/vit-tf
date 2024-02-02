@@ -2,6 +2,10 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from collections import defaultdict
+from pathlib import Path
+import os
+import sys
+import time
 
 def make_nd(t, n):
     '''  Prepends singleton dimensions to `t` until n-dimensional '''
@@ -40,6 +44,7 @@ def get_dino_model(name):
 
 def get_dinov2_model(name):
     return torch.hub.load('facebookresearch/dinov2', f'dinov2_{name}')
+
 def sample_features3d(feat_vol, rel_coords, mode='nearest'):
     '''Samples features at given coords from `feat_vol` by interpolating the feature maps in all dimensions. This should result in nearest interpolation along the un-reduced dimension
 
@@ -204,14 +209,61 @@ def compute_qkv(vol, model, patch_size, im_sizes, pool_fn=_noop, batch_size=1, s
         del v
     return out
 
-if __name__ == '__main__':
-    dino_archs = ['vits16', 'vits8', 'vitb16', 'vitb8']
-    dino2_archs = ['vits14', 'vitb14', 'vitl14', 'vitg14']
-    from torchvision.transforms.functional import normalize
-    from pathlib import Path
-    from argparse import ArgumentParser
-    import os, sys
+def load_data(data_path):
+    data_path = Path(data_path)
+    if not data_path.exists():
+        print(f'Invalid argument for --data-path (File does not exist): {data_path}')
+        sys.exit(1)
 
+    print(f'Attempting to load {data_path}.')
+    if data_path.suffix in ['.pt', '.pth']:
+        data = torch.load(data_path)
+        if type(data) == dict:
+            vol = data['vol']
+        else:
+            vol = data
+        print(f'Loaded volume: {vol.shape} of type {vol.dtype}.')
+        assert vol.ndim == 3
+    elif data_path.suffix == '.npy':
+        data = np.load(data_path, allow_pickle=True)
+        if data.dtype == "O":
+            vol = torch.from_numpy(data[()]['vol'].astype(np.float32))
+        else:
+            vol = torch.from_numpy(data.astype(np.float32))
+        print(f'Loaded volume: {vol.shape} of type {vol.dtype}.')
+        assert vol.ndim == 3
+    else:
+        print(f'Unsupported file extension: {data_path.suffix}')
+    return vol
+
+def load_model(args):
+    if not args.dino_model and not args.dino2_model:
+        print('No DINO/DINOv2 model specified, using default: vits8')
+        dino_model = 'vits8'
+        args.dino_model = dino_model
+        args.model = dino_model
+        dino_model_fn = get_dino_model
+        patch_size = 8
+    elif args.dino_model and args.dino2_model:
+        print(f'Both --dino-model and --dino2-model were set. Please only set one of them.')
+        sys.exit(1)
+    elif args.dino_model:
+        dino_model = args.dino_model
+        args.model = dino_model
+        dino_model_fn = get_dino_model
+        patch_size = 8 if dino_model[-1] == '8' else 16
+    elif args.dino2_model:
+        dino_model = args.dino2_model
+        args.dino_model = dino_model
+        args.model = dinoo_model
+        dino_model_fn = get_dinov2_model
+        patch_size = 14
+    else:
+        print('Something weird happend with --dino-model / --dino2-model. Set exactly 1 of them.')
+        sys.exit(1)
+    return dino_model, dino_model_fn, patch_size
+
+def handle_output_path(args):
     def is_path_creatable(pathname: str) -> bool:
         '''
         `True` if the current user has sufficient permissions to create the passed
@@ -221,6 +273,25 @@ if __name__ == '__main__':
         # working directory (CWD) instead.
         dirname = os.path.dirname(pathname) or os.getcwd()
         return os.access(dirname, os.W_OK)
+    # Construct output path
+    data_path = Path(args.data_path)
+    if not args.cache_path:
+        args.cache_path = data_path.parent / f'{data_path.stem}_{args.model.replace("/", "_")}_{args.slice_along}_features{args.feature_output_size}{data_path.suffix}'
+    cache_path = Path(args.cache_path)
+    # Check if output path is valid
+    if cache_path.exists() and not args.overwrite:
+        print(f'Cache file already exists: {cache_path}. Use --overwrite to overwrite.')
+        sys.exit(1)
+    if not is_path_creatable(args.cache_path):
+        print(f'Invalid argument for --cache-path (Cannot write to location): {args.cache_path}')
+        sys.exit(1)
+    return cache_path
+
+if __name__ == '__main__':
+    dino_archs = ['vits16', 'vits8', 'vitb16', 'vitb8']
+    dino2_archs = ['vits14', 'vitb14', 'vitl14', 'vitg14']
+    from torchvision.transforms.functional import normalize
+    from argparse import ArgumentParser
 
     parser = ArgumentParser('Infer DINO features from saved volume')
     parser.add_argument('--data-path', type=str, required=True, help='Path to the saved volume')
@@ -237,62 +308,11 @@ if __name__ == '__main__':
     dev = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     typ = torch.float16 if dev == torch.device('cuda') else torch.float32
     # Determine DINO model and patch size
-    if not args.dino_model and not args.dino2_model:
-        print('No DINO/DINOv2 model specified, using default: vits8')
-        dino_model = 'vits8'
-        dino_model_fn = get_dino_model
-        patch_size = 8
-    elif args.dino_model and args.dino2_model:
-        print(f'Both --dino-model and --dino2-model were set. Please only set one of them.')
-        sys.exit(1)
-    elif args.dino_model:
-        dino_model = args.dino_model
-        dino_model_fn = get_dino_model
-        patch_size = 8 if dino_model[-1] == '8' else 16
-    elif args.dino2_model:
-        dino_model = args.dino2_model
-        dino_model_fn = get_dinov2_model
-        patch_size = 14
-    else:
-        print('Something weird happend with --dino-model / --dino2-model. Set exactly 1 of them.')
-        sys.exit(1)
-
-    data_path = Path(args.data_path)
-    if not args.cache_path:
-        args.cache_path = data_path.parent / f'{data_path.stem}_{dino_model}_{args.slice_along}_features{args.feature_output_size}{data_path.suffix}'
-    cache_path = Path(args.cache_path)
-    if cache_path.exists() and not args.overwrite:
-        print(f'Cache file already exists: {cache_path}. Use --overwrite to overwrite.')
-        sys.exit(1)
-
-    if not data_path.exists():
-        print(f'Invalid argument for --data-path (File does not exist): {args.data_path}')
-        sys.exit(1)
-    if not is_path_creatable(args.cache_path):
-        print(f'Invalid argument for --cache-path (Cannot write to location): {args.cache_path}')
-        sys.exit(1)
+    dino_model, dino_model_fn, patch_size = load_model(args)
+    cache_path = handle_output_path(args)
 
     with torch.no_grad():
-        print(f'Attempting to load {args.data_path}.')
-        if data_path.suffix in ['.pt', '.pth']:
-            data = torch.load(data_path)
-            if type(data) == dict:
-                vol = data['vol']
-            else:
-                vol = data
-            print(f'Loaded volume: {vol.shape} of type {vol.dtype}.')
-            assert vol.ndim == 3
-        elif data_path.suffix == '.npy':
-            data = np.load(data_path, allow_pickle=True)
-            if data.dtype == "O":
-                vol = torch.from_numpy(data[()]['vol'].astype(np.float32))
-            else:
-                vol = torch.from_numpy(data.astype(np.float32))
-            print(f'Loaded volume: {vol.shape} of type {vol.dtype}.')
-            assert vol.ndim == 3
-        else:
-            print(f'Unsupported file extension: {data_path.suffix}')
-
+        vol = load_data(args.data_path) # Load volume
         # Compute Input Image Size
         ref_fact = sorted(vol.shape[-3:])[1] / args.feature_output_size
         im_sz       = tuple(map(lambda d: int(patch_size * (d // ref_fact)), vol.shape[-3:]))
@@ -301,6 +321,7 @@ if __name__ == '__main__':
 
         # Compute Features
         model = dino_model_fn(dino_model).to(dev).eval()
+        t0 = time.time()
         if args.slice_along in ['x', 'y', 'z']:
             qkv = compute_qkv(vol, model, patch_size, im_sz, batch_size=args.batch_size, return_keys='k', slice_along=args.slice_along, dev=dev, typ=typ)
         elif args.slice_along == 'all':
@@ -312,7 +333,7 @@ if __name__ == '__main__':
                     print(k, ':', qkv[k].shape)
         else:
             raise Exception(f'Invalid argument for --slice-along: {args.slice_along}. Must be x,y,z or all')
-        print(f'Computed qkv, saving now to: {cache_path}')
+        print(f'Computed qkv along {args.slice_along} in {time.time() - t0}s, saving now to: {cache_path}')
         if cache_path.suffix in ['.pt', '.pth']:
             torch.save(qkv, cache_path)
         elif cache_path.suffix == '.npy':
