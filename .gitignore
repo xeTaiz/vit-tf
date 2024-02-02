@@ -12,3 +12,11 @@ render_videos/
 **/*.npy
 metrics/
 userstudy/
+final_ctorg_5pred/
+final_ctorg_pred/
+final_ctorg_pred256/
+userstudy-results/
+userstudy-results-bls/
+synth_data/
+synth_feats/
+
