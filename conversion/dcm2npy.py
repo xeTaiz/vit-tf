@@ -3,10 +3,11 @@ import numpy as np
 from pathlib import Path
 from argparse import ArgumentParser
 import os
+import nibabel as nb
 
 if __name__ == '__main__':
     # open
-    path = Path('/home/dome/Downloads/Vattenfantom/DICOM/22110307')
+    path = Path('/home/dome/Data/Volumes/VC_WOLF_LYMPHOM/1000A05D/1000A05E/')
     dirs = os.listdir(path)
     for dir in dirs:
         files = os.listdir(path/dir)
@@ -19,4 +20,6 @@ if __name__ == '__main__':
                 print(fn, 'has no pixel_array')
         vol = np.stack(arrays, axis=-1)
         print('Found volume:', vol.shape, vol.dtype, vol.min(), vol.max())
-        np.save(f'/run/media/dome/SSD/Data/Volumes/VattenfantomNpy/vattenfantom_{dir}.npy', vol)
+        np.save(f'/home/dome/Data/Volumes/VC_WOLF_LYMPHOM/1000A05D.npy', vol)
+        nib_im = nb.Nifti1Image(vol, np.eye(4))
+        nb.save(nib_im, '/home/dome/Data/Volumes/VC_WOLF_LYMPHOM/1000A05D.nii.gz')
