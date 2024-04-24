@@ -16,7 +16,10 @@ final_ctorg_5pred/
 final_ctorg_pred/
 final_ctorg_pred256/
 userstudy-results/
-userstudy-results-bls/
+userstudy-results-bls
 synth_data/
 synth_feats/
-
+synth_data_*/
+synth_pred_*/
+carp_fine_details
+carp_fine_details_crop

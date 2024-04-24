@@ -98,13 +98,21 @@ if __name__ == '__main__':
     parser.add_argument('--svm-kernel', type=str, choices=['linear', 'poly', 'rgb', 'sigmoid', 'precomputed'], default='rbf', help='SVM Kernel function, see scikit-learn docs')
     parser.add_argument('--load-sims', action='store_true', help='Load similarities from file')
     parser.add_argument('--use-intensity-only', action='store_true', help='Use intensity only')
+    parser.add_argument('--use-dino-features', action='store_true', help='Use DINO features')
     parser.add_argument('--num-samples', type=float, default=0.0, help='Number of samples to use for training, 0 to use annotations.npy')
     parser.add_argument('--sampling-mode', type=str, choices=['uniform', 'surface', 'both'], default='uniform', help='Sampling mode')
     parser.add_argument('--exclude-bg', action='store_true', help='Exclude background class from training and evaluation')
+    parser.add_argument('--no-svm', action='store_true', help='Disable SVM')
+    parser.add_argument('--no-rf', action='store_true', help='Disable RF')
     args = parser.parse_args()
 
     dir = Path(args.data)
-    feat_str = '_intensity' if args.use_intensity_only else ''
+    if args.use_intensity_only:
+        feat_str = '_intensity'
+    elif args.use_dino_features:
+        feat_str = '_dino'
+    else:
+        feat_str = ''
     bg_str = "_nobg" if args.exclude_bg else ""
     suffix = f'{args.num_samples}{args.sampling_mode}{feat_str}{bg_str}'
     if (dir / f'svm_metrics_{suffix}.json').exists() and (dir / f'rf_metrics_{suffix}.json').exists():
@@ -152,11 +160,19 @@ if __name__ == '__main__':
     # input has 11-dim features containing intensity, grad mag, intensities of 6 neighbors and voxel coordinate, normalized to mean 0 std 1
     if args.use_intensity_only:
         features = make_4d(torch.from_numpy(volume.astype(np.float32)))
+    elif args.use_dino_features:
+        feats = np.load(dir / 'dino_features.npy', allow_pickle=True)[()]
+        if isinstance(feats, dict):
+            feats = feats['k']
+        print(feats.shape)
+        features = make_4d(torch.from_numpy(feats).squeeze())
     else:
         features = compose_features(torch.from_numpy(volume.astype(np.float32)))
 
+    feat_size = features.shape[-3:]
     print('features', features.shape)
-    if labels is not None:
+    print('labels', labels.shape, labels.min(), labels.max())
+    if False and labels is not None:
         train_X, train_y = sample_train_data(features, torch.from_numpy(labels).float(), annotations)
     else:
         train_X, train_y = sample_train_data(features, None, annotations)
@@ -168,6 +184,10 @@ if __name__ == '__main__':
     print('suffix', suffix)
     features = features.permute(1,2,3,0).reshape(-1, features.shape[0]).numpy()
     print(train_y)
+    if args.use_dino_features:
+        print('labels', labels.shape, '->', feat_size, labels.dtype)
+        labels = F.interpolate(make_5d(torch.as_tensor(labels)), size=feat_size, mode='nearest').squeeze().numpy()
+
     if args.exclude_bg:
         non_bg_mask = labels != 0
         labels = labels.reshape(-1)
@@ -179,9 +199,11 @@ if __name__ == '__main__':
     elif labels is not None:
         labels = labels.reshape(-1)
 
-    if not (dir / f'svm_metrics{suffix}.json').exists():
+    if not (dir / f'svm_metrics{suffix}.json').exists() and not args.no_svm:
         clf = SVC(kernel=args.svm_kernel)
         t_svm_0 = time.time()
+        print('train_X', train_X.shape, train_X.min(), train_X.max())
+        print('train_y', train_y.shape, train_y.min(), train_y.max())
         clf.fit(train_X, train_y)
         t_svm_1 = time.time()
         svm_pred = clf.predict(features)
@@ -193,10 +215,10 @@ if __name__ == '__main__':
         ax[0].set_title(f'SVM. Acc: {svm_train_acc:.3f}')
         ax[0].hist(svm_pred, bins=np.arange(svm_pred.max()+2)-0.5)
         if args.exclude_bg:
-            predv = np.zeros(tuple(volume.shape), dtype=np.uint8)
+            predv = np.zeros(tuple(feat_size), dtype=np.uint8)
             predv[non_bg_mask] = svm_pred
         else:
-            predv = svm_pred.reshape(volume.shape)
+            predv = svm_pred.reshape(feat_size)
         np.save(dir / f'svm_pred{suffix}.npy', predv)
         if labels is not None:
             prec, rec, f1, _ = precision_recall_fscore_support(labels, svm_pred, average=None)
@@ -222,8 +244,8 @@ if __name__ == '__main__':
             with open(dir / f'svm_metrics{suffix}.json', 'w') as f:
                 json.dump(svm_metrics, f)
 
-    if not (dir / f'rf_metrics{suffix}.json').exists():
-        clf = RandomForestClassifier(n_estimators=32)
+    if not (dir / f'rf_metrics{suffix}.json').exists() and not args.no_rf:
+        clf = RandomForestClassifier(n_estimators=1024, max_features=None)
         t_rf_0 = time.time()
         clf.fit(train_X, train_y)
         t_rf_1 = time.time()
@@ -232,15 +254,62 @@ if __name__ == '__main__':
         print('RF fit time:', t_rf_1 - t_rf_0)
         print('RF predict time:', t_rf_2 - t_rf_1)
         rf_train_acc = clf.score(train_X, train_y)
-        print('RF train accuracy:', svm_train_acc)
+        print('RF train accuracy:', rf_train_acc)
         ax[1].set_title(f'Random Forests. Acc: {rf_train_acc:.3f}')
         ax[1].hist(rf_pred, bins=np.arange(rf_pred.max()+2)-0.5)
         fig.savefig(dir / f'rf_pred{suffix}.png')
         if args.exclude_bg:
-            predv = np.zeros(tuple(volume.shape), dtype=np.uint8)
+            predv = np.zeros(tuple(feat_size), dtype=np.uint8)
             predv[non_bg_mask] = rf_pred
         else:
-            predv = rf_pred.reshape(volume.shape)
+            predv = rf_pred.reshape(feat_size)
+        np.save(dir / f'rf_pred{suffix}.npy', predv)
+        if labels is not None:
+            prec, rec, f1, _ = precision_recall_fscore_support(labels, rf_pred, average=None)
+            cm = confusion_matrix(labels, rf_pred)
+            acc = accuracy_score(labels, rf_pred)
+            iou = jaccard_score(labels, rf_pred, average=None)
+            rf_metrics = {
+                'mAcc': acc,
+                'precision': dict(zip(annotation_keys, prec.tolist())),
+                'mPrec': np.mean(prec),
+                'recall': dict(zip(annotation_keys, rec.tolist())),
+                'mRec': np.mean(rec),
+                'f1': dict(zip(annotation_keys, f1.tolist())),
+                'mF1': np.mean(f1),
+                'iou': dict(zip(annotation_keys, iou.tolist())),
+                'mIoU': np.mean(iou),
+                'confusion_matrix': dict(zip(annotation_keys, cm.tolist())),
+                'fit_time': t_rf_1 - t_rf_0,
+                'predict_time': t_rf_2 - t_rf_1,
+            }
+            print('RF Metrics:')
+            pprint(rf_metrics)
+            with open(dir / f'rf_metrics{suffix}.json', 'w') as f:
+                json.dump(rf_metrics, f)
+
+
+    if not (dir / f'kmeans_metrics{suffix}.json').exists():
+        n_cls = 5 if args.no_bg else 6
+        clf = sklearn.cluster.KMeans(n_clusters=n_cls)
+        clf = RandomForestClassifier(n_estimators=1024, max_features=None)
+        t_rf_0 = time.time()
+        clf.fit(train_X, train_y)
+        t_rf_1 = time.time()
+        rf_pred = clf.predict(features)
+        t_rf_2 = time.time()
+        print('RF fit time:', t_rf_1 - t_rf_0)
+        print('RF predict time:', t_rf_2 - t_rf_1)
+        rf_train_acc = clf.score(train_X, train_y)
+        print('RF train accuracy:', rf_train_acc)
+        ax[1].set_title(f'Random Forests. Acc: {rf_train_acc:.3f}')
+        ax[1].hist(rf_pred, bins=np.arange(rf_pred.max()+2)-0.5)
+        fig.savefig(dir / f'rf_pred{suffix}.png')
+        if args.exclude_bg:
+            predv = np.zeros(tuple(feat_size), dtype=np.uint8)
+            predv[non_bg_mask] = rf_pred
+        else:
+            predv = rf_pred.reshape(feat_size)
         np.save(dir / f'rf_pred{suffix}.npy', predv)
         if labels is not None:
             prec, rec, f1, _ = precision_recall_fscore_support(labels, rf_pred, average=None)
