@@ -1,5 +1,6 @@
 # Leveraging Self-Supervised Vision Transformers for Segmentation-based Transfer Function Design
-[Paper](https://arxiv.org/abs/2309.01408)  ---  [Project Page](https://dominikengel.com/vit-tf)
+[Paper](https://arxiv.org/abs/2309.01408) $~~~$ [Project Page](https://dominikengel.com/vit-tf)
+
 This is the official repository of the paper by [Dominik Engel](https://dominikengel.com), [Leon Sick](https://leonsick.github.io) and
 [Timo Ropinski](https://viscom.uni-ulm.de/members/timo-ropinski/).
 
