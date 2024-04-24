@@ -9,6 +9,8 @@ This repository contains
 - Evaluation Code
 - Baselines
 
+[![Demonstration of our Method](https://img.youtube.com/vi/kTPBCYJtEJc/0.jpg)](https://www.youtube.com/watch?v=kTPBCYJtEJc)
+
 # Code for the Volume Renderer and GUI
 The full project requires you to build [Inviwo](https://github.com/inviwo/inviwo) ([inviwo.org](https://inviwo.org)) together
 with our [external Module](https://github.com/xeTaiz/inviwo-module-vittf).
